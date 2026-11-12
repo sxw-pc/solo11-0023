@@ -1,0 +1,14 @@
+# 合成 fixture：同名指标，两套结构相同的数据源。预期判定 consistent。
+key: active_users
+name: 活跃用户数
+owner: data-platform
+description: 按最后活跃日期统计的去重活跃用户数。
+unit: 人
+grain: day
+impls:
+  - id: impl_a
+    source: users_a
+    sql_file: active_users_impl_a.sql
+  - id: impl_b
+    source: users_b
+    sql_file: active_users_impl_b.sql

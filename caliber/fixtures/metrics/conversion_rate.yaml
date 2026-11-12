@@ -1,0 +1,14 @@
+# 合成 fixture：两套数据源的不同订单金额不影响转化率，预期 consistent。
+key: conversion_rate
+name: 支付转化率
+owner: growth-analytics
+description: 按日统计已支付订单占全部订单的比例，单位为百分比。
+unit: '%'
+grain: day
+impls:
+  - id: impl_a
+    source: orders_a
+    sql_file: conversion_rate_impl_a.sql
+  - id: impl_b
+    source: orders_b
+    sql_file: conversion_rate_impl_b.sql

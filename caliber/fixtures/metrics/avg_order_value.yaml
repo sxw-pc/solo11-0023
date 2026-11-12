@@ -1,0 +1,14 @@
+# 合成 fixture：两套数据源金额存在真实差异，预期 inconsistent。
+key: avg_order_value
+name: 客单价
+owner: commerce-analytics
+description: 按日统计订单平均金额；fixture 中两套数据源故意存在金额差异。
+unit: 元
+grain: day
+impls:
+  - id: impl_a
+    source: orders_a
+    sql_file: avg_order_value_impl_a.sql
+  - id: impl_b
+    source: orders_b
+    sql_file: avg_order_value_impl_b.sql

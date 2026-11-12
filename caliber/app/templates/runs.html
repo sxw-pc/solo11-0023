@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>比对运行 · 指标准星</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><span class="mark">◎</span> 指标准星</a>
+  <nav>
+    <a href="/">总览</a> <a href="/metrics">指标仓库</a> <a class="active" href="/runs">比对运行</a>
+  </nav>
+  <span class="local-badge">仅本机</span>
+</header>
+
+<main class="page">
+  <section class="detail-head compact">
+    <div>
+      <p class="eyebrow">CONSISTENCY RUN</p>
+      <h1>多实现一致性比对</h1>
+      <p class="lede">选择指标后，同一指标的所有实现会在只读 SQLite 连接中执行并逐维度对齐比较。</p>
+    </div>
+  </section>
+
+  <section class="panel run-panel">
+    <div class="panel-head"><h2>发起运行</h2><span class="muted">同步执行 · 超时 5 秒/实现</span></div>
+    {% if metrics %}
+    <form id="run-form" class="run-form" data-endpoint="/api/runs">
+      <fieldset>
+        <legend>指标</legend>
+        <div class="check-grid">
+        {% for item in metrics %}
+          <label class="check"><input type="checkbox" name="metrics" value="{{ item.key }}" checked>
+            <span>{{ item.name }} <code>{{ item.key }}</code></span>
+          </label>
+        {% endfor %}
+        </div>
+      </fieldset>
+      <div class="form-row">
+        <label>数据集目录
+          <input type="text" name="datasets_dir" value="fixtures/datasets">
+        </label>
+        <label>绝对容差
+          <input type="number" name="abs" value="0.000001" step="0.000001" min="0">
+        </label>
+        <label>相对容差
+          <input type="number" name="rel" value="0" step="0.000001" min="0">
+        </label>
+        <button class="button primary" type="submit">执行比对</button>
+      </div>
+      <p class="form-note">容差判定：|a-b| ≤ abs + rel × max(|a|,|b|)。</p>
+      <div id="run-message" class="message" role="status" aria-live="polite"></div>
+    </form>
+    {% else %}
+    <div class="empty">
+      <p>没有可运行的指标。请先导入 fixture：</p>
+      <code>python -m app import-metrics --dir fixtures/metrics</code>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>运行历史</h2><span class="muted">{{ runs | length }} 条</span></div>
+    {% if runs %}
+    <table>
+      <thead><tr><th>运行</th><th>状态</th><th>指标</th><th>结果</th><th>开始时间</th><th></th></tr></thead>
+      <tbody>
+      {% for run in runs %}
+        <tr>
+          <td><strong>#{{ run.id }}</strong></td>
+          <td><span class="pill {{ run.status }}">{{ run.status }}</span></td>
+          <td>{{ run.metrics | join(', ') }}</td>
+          <td>
+            {% for snap in run.snapshots %}
+              <span class="pill {{ snap.verdict }}">{{ snap.metric_key }}: {{ snap.verdict }}</span>
+            {% endfor %}
+            {% if not run.snapshots %}<span class="muted">-</span>{% endif %}
+          </td>
+          <td class="muted">{{ run.started_at }}</td>
+          <td>{% if run.status == 'completed' %}<a class="quiet" href="/reports/{{ run.id }}">报告</a>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty"><p>尚无运行记录。</p></div>
+    {% endif %}
+  </section>
+</main>
+<footer class="footer">指标准星 · SELECT-only 求值 · 路径白名单 · 本机回环</footer>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

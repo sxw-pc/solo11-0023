@@ -1,0 +1,11 @@
+order_id,order_date,user_id,channel,amount,status
+B001,2026-02-01,2001,web,200.00,paid
+B002,2026-02-01,2002,web,160.00,paid
+B003,2026-02-01,2003,mobile,120.00,unpaid
+B004,2026-02-02,2004,mobile,80.00,paid
+B005,2026-02-02,2005,web,240.00,paid
+B006,2026-02-02,2006,store,100.00,paid
+B007,2026-02-03,2007,store,140.00,unpaid
+B008,2026-02-03,2001,mobile,180.00,paid
+B009,2026-02-03,2002,mobile,220.00,paid
+B010,2026-02-04,2003,web,60.00,unpaid

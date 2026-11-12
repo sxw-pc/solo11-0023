@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>指标准星 · 本地指标一致性工作台</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><span class="mark">◎</span> 指标准星</a>
+  <nav>
+    <a class="active" href="/">总览</a> <a href="/metrics">指标仓库</a> <a href="/runs">比对运行</a>
+  </nav>
+  <span class="local-badge">仅本机</span>
+</header>
+
+<main class="page">
+  <section class="hero">
+    <div>
+      <p class="eyebrow">OFFLINE METRIC CONSISTENCY</p>
+      <h1>让同一个指标，只有一种口径。</h1>
+      <p class="lede">声明式定义、版本化仓库、多实现比对与本机报告。所有数据来自本地 fixture，不访问任何网络资源。</p>
+    </div>
+    <div class="hero-actions">
+      <a class="button primary" href="/runs">发起比对</a>
+      <a class="button" href="/metrics">查看指标</a>
+    </div>
+  </section>
+
+  <section class="stats">
+    <div class="stat"><span class="num">{{ counts.metrics }}</span><span>指标定义</span></div>
+    <div class="stat"><span class="num">{{ counts.versions }}</span><span>版本记录</span></div>
+    <div class="stat"><span class="num">{{ counts.runs }}</span><span>比对运行</span></div>
+    <div class="stat"><span class="num">{{ counts.snapshots }}</span><span>口径快照</span></div>
+  </section>
+
+  <section class="grid two">
+    <div class="panel">
+      <div class="panel-head"><h2>指标仓库</h2><a href="/metrics">全部指标 →</a></div>
+      {% if metrics %}
+      <table>
+        <thead><tr><th>指标</th><th>版本</th><th>粒度</th><th></th></tr></thead>
+        <tbody>
+        {% for item in metrics %}
+          <tr>
+            <td><a href="/metrics/{{ item.key }}">{{ item.name }}</a><small>{{ item.key }}</small></td>
+            <td>v{{ item.version }}</td>
+            <td>{{ item.grain }}</td>
+            <td><a class="quiet" href="/metrics/{{ item.key }}">详情</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">
+        <p>尚未导入指标。</p>
+        <code>python -m app import-metrics --dir fixtures/metrics</code>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>最近运行</h2><a href="/runs">全部运行 →</a></div>
+      {% if runs %}
+      <ul class="run-list">
+        {% for run in runs %}
+        <li>
+          <div><strong>#{{ run.id }}</strong> <span class="pill {{ run.status }}">{{ run.status }}</span></div>
+          <div class="muted">{{ run.started_at }}</div>
+          <div class="muted">{{ run.metrics | join(', ') }}</div>
+          {% if run.status == 'completed' %}<a href="/reports/{{ run.id }}">查看报告</a>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty"><p>还没有比对记录。进入「比对运行」执行第一次校验。</p></div>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>本地数据集</h2><span class="muted">CSV → 内存 SQLite</span></div>
+    {% if datasets %}
+    <table>
+      <thead><tr><th>数据集</th><th>行数</th><th>列数</th><th>编码</th><th>列类型</th></tr></thead>
+      <tbody>
+      {% for item in datasets %}
+        <tr>
+          <td><strong>{{ item.key }}</strong></td>
+          <td>{{ item.row_count }}</td>
+          <td>{{ item.column_count }}</td>
+          <td>{{ item.encoding }}</td>
+          <td>{% for col in item.columns %}<span class="tag">{{ col.name }}:{{ col.type }}</span>{% endfor %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty"><p>数据集目录中没有可加载的 CSV。</p></div>
+    {% endif %}
+  </section>
+</main>
+<footer class="footer">指标准星 · 纯本地运行 · 无外部请求 · {{ now }}</footer>
+</body>
+</html>
