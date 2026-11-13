@@ -15,6 +15,23 @@ class ImplementDef:
     id: str
     source: str
     sql_file: str
+    # 可选访问范围声明（{"tables": [...], "sqlite_master": bool}）。
+    # 老 YAML 不带该字段时为 None，门禁降级为全量校验而不报错。
+    access: dict[str, Any] | None = None
+    # 显式白名单：误报可接受时按 rule/statement_type/table 放行并写审计。
+    allowlist: list[dict[str, Any]] = field(default_factory=list)
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "ImplementDef":
+        access = data.get("access")
+        allowlist = data.get("allowlist", [])
+        return cls(
+            id=str(data.get("id", "")),
+            source=str(data.get("source", "")),
+            sql_file=str(data.get("sql_file", "")),
+            access=dict(access) if isinstance(access, Mapping) else None,
+            allowlist=[dict(item) for item in allowlist if isinstance(item, Mapping)],
+        )
 
 
 @dataclass(slots=True)
@@ -33,11 +50,7 @@ class MetricDefinition:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "MetricDefinition":
         impls = [
-            ImplementDef(
-                id=str(item.get("id", "")),
-                source=str(item.get("source", "")),
-                sql_file=str(item.get("sql_file", "")),
-            )
+            ImplementDef.from_mapping(item)
             for item in data.get("impls", [])
             if isinstance(item, Mapping)
         ]
@@ -74,6 +87,8 @@ class ImportResult:
 class ImportSummary:
     imported: list[ImportResult] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
+    # 安全门禁批次统计：检查的实现数、拒绝数、白名单放行数、降级次数。
+    gate_stats: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -107,6 +122,13 @@ class ImplEvaluation:
     values: dict[str, float]
     row_count: int
     duration_ms: float
+    # 只读安全门禁结果。rejected=True 时该实现未被执行，values 为空，
+    # rejection_reason 记录规则、语句类型、证据，供快照与审计定位。
+    rejected: bool = False
+    rejection_reason: dict[str, Any] | None = None
+    gate_mode: str | None = None
+    sql_sha256: str | None = None
+    whitelisted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

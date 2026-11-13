@@ -33,6 +33,7 @@
     <div class="stat good"><span class="num">{{ report.summary.consistent }}</span><span>consistent</span></div>
     <div class="stat bad"><span class="num">{{ report.summary.inconsistent }}</span><span>inconsistent</span></div>
     <div class="stat warn"><span class="num">{{ report.summary.partial }}</span><span>partial</span></div>
+    <div class="stat bad"><span class="num">{{ report.summary.rejected | default(0) }}</span><span>rejected</span></div>
     <div class="stat"><span class="num">{{ report.summary.drift_count }}</span><span>漂移事件</span></div>
   </section>
 
@@ -50,13 +51,39 @@
       <span>容差：abs {{ item.tolerances.abs }} / rel {{ item.tolerances.rel }}</span>
     </div>
     <table>
-      <thead><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th></tr></thead>
+      <thead><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th><th>状态</th></tr></thead>
       <tbody>
       {% for impl in item.implementations %}
-        <tr><td><strong>{{ impl.impl_id }}</strong></td><td>{{ impl.source }}</td><td>{{ impl.row_count }}</td><td>{{ impl.duration_ms }}</td></tr>
+        <tr>
+          <td><strong>{{ impl.impl_id }}</strong></td>
+          <td>{{ impl.source }}</td>
+          <td>{{ impl.row_count }}</td>
+          <td>{{ impl.duration_ms }}</td>
+          <td>
+            {% if impl.rejected %}
+              <span class="pill inconsistent">拒绝（{{ impl.rejection_reason.rule if impl.rejection_reason else 'unsafe_sql' }}）</span>
+            {% else %}
+              <span class="pill consistent">已执行</span>
+            {% endif %}
+          </td>
+        </tr>
       {% endfor %}
       </tbody>
     </table>
+    {% set rejected_impls = item.implementations | selectattr('rejected') | list %}
+    {% if rejected_impls %}
+    <h3>门禁拒绝明细（已写入审计）</h3>
+    <ul>
+      {% for impl in rejected_impls %}
+      <li>
+        <code>{{ impl.impl_id }}</code>（{{ impl.sql_file }}）：
+        语句类型 {{ impl.rejection_reason.statement_type if impl.rejection_reason else 'UNKNOWN' }}，
+        规则 <code>{{ impl.rejection_reason.rule if impl.rejection_reason else 'unsafe_sql' }}</code>，
+        {{ impl.rejection_reason.message if impl.rejection_reason else '只读门禁拒绝' }}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
     {% if item.diffs %}
     <h3>不一致维度</h3>
     <table>

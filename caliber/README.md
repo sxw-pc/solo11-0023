@@ -79,6 +79,8 @@ pytest --cov=app/core --cov-report=term-missing
 | `id` | 指标内唯一的实现标识，匹配 `^[a-z][a-z0-9_]{1,40}$` |
 | `source` | 数据集 key，对应 `fixtures/datasets/<key>.csv` |
 | `sql_file` | 相对路径，只能在配置的受信任 SQL 目录内解析 |
+| `access` | 可选，访问范围声明 `{tables: [...], sqlite_master: bool}`；缺省时按全量校验处理 |
+| `allowlist` | 可选，误报可接受时的显式白名单条目数组，每条含 `rule`、`reason`，可再限定 `statement_type`、`table` |
 
 完整示例（与 `fixtures/metrics/active_users.yaml` 一致）：
 
@@ -181,8 +183,16 @@ caliber/
 
 ## 7. 安全与合规
 
-- **只读 SQL**：语句白名单只允许 `SELECT` / `WITH`；显式拒绝写入、DDL、ATTACH、PRAGMA、事务控制等关键字，并拒绝多语句。求值连接设置 `PRAGMA query_only = ON`，每次查询在事务中执行后回滚。违规语句抛出 `unsafe_sql`，测试覆盖写操作和 ATTACH。
-- **路径白名单**：`sql_file` 只能相对受信任 SQL 目录解析。绝对路径、`..`、锚点路径以及逃逸出根目录的解析结果均被拒绝。
+- **只读安全门禁（import/run 共用）**：门禁实现为独立模块 `app/core/sql_gate.py`，只被导入（`MetricRegistry`）与运行（`evaluator`/`snapshot`）两条入口调用，两条链路执行同一份判定逻辑。选择独立模块而不是塞进执行器，是为了让「导入时校验」和「运行前复核」天然一致；执行器只保留调用与单实现失败隔离职责。该取舍与降级策略写入运行元信息 `gate_meta`（同时落在 run summary 与快照 summary 中）。
+- **判定方式（不靠关键字正则硬匹配）**：
+  - 语句前缀与括号结构扫描只负责归类语句类型（SELECT/WITH/INSERT/UPDATE/DELETE/DROP/PRAGMA/ATTACH 等），并能识别 `WITH ... DELETE` 这类外层终止关键字；
+  - 完整模式下对只读连接执行 `EXPLAIN`，以字节码写操作码（`OpenWrite`/`Clear`/`Delete`/`Insert` 等）判定写操作，并通过 `sqlite_master.rootpage` 把游标 rootpage 映射回真实表名，别名、`main.table` 限定名、CTE 都适用；递归 CTE 与窗口函数里作用于临时表的 `Insert/Delete`（p4 为空）不会误报；
+  - `EXPLAIN QUERY PLAN` 识别对 `sqlite_master`/`sqlite_schema` 的访问；
+  - 无法生成执行计划（如表不存在）按失败关闭处理，且不接受白名单豁免。
+- **两阶段校验与防掉包**：导入时按当时的 SQL 内容（SHA-256 哈希缓存键）校验；运行侧在每个实现真正执行前用同一模块再核一次，导入后文件被替换成 DROP/DELETE 会因哈希变化重新校验并在执行前被拦下。被拒实现单独标记 `rejected` 并记录原因，同指标其他实现继续执行；全部实现被拒时指标判定为 `rejected`。门禁失败不中断整批 run，也不会把已入库的合法版本标记失效。
+- **访问范围与降级**：实现可用 `access.tables` 声明可读表范围，越权表访问按 `table_out_of_scope` 拒绝；老 YAML 没有 `access` 字段时自动降级为全量校验而不报错。导入现场拿不到数据集 schema 时，门禁工作在 `degraded` 模式（仅前缀/结构校验，仍拦截全部非只读语句），运行侧拿到 catalog 后始终执行完整校验。
+- **白名单与审计**：误报可接受的语句通过 YAML `allowlist` 显式放行，必须写明 `rule` 与 `reason`；放行与拒绝都写入 `audit_log`（动作 `sql_gate.whitelist` / `sql_gate.rejected`），拒绝原因精确定位到指标 key、impl id、SQL 文件、语句类型与规则。空 SQL、多语句、EXPLAIN 失败属于不可白名单的硬性拒绝。
+- **只读执行兜底**：求值连接设置 `PRAGMA query_only = ON`，每次查询在事务中执行后回滚；路径白名单仍然生效，`sql_file` 只能相对受信任 SQL 目录解析，绝对路径、`..` 与逃逸根目录的解析结果均被拒绝。
 - **仅本机**：默认且只允许监听 `127.0.0.1`（或同义回环地址）；无鉴权，因为定位是单机工作台。
 - **完全离线**：运行期不发起网络请求。模板不引用 CDN、远程字体、遥测或外部 API。
 - **审计**：导入、运行、失败与报告导出写入本地 `audit_log`；异常由 CLI/HTTP 边界统一捕获，不静默失败。

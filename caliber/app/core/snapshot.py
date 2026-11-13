@@ -10,9 +10,10 @@ from ..audit import log_audit, record_error
 from ..errors import CaliberError, NotFoundError, RunError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition, utc_now
 from .evaluator import run_metric
+from .sql_gate import GATE_META, SqlGate
 from .versioning import get_latest, list_metrics
 
-VERDICTS = ("consistent", "inconsistent", "partial")
+VERDICTS = ("consistent", "inconsistent", "partial", "rejected")
 
 
 def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
@@ -163,28 +164,59 @@ def perform_run(
     keys = list(dict.fromkeys(metric_keys or [item["key"] for item in list_metrics(conn)]))
     if not keys:
         raise RunError("没有可执行的指标，请先导入指标定义")
+    # 请求的指标不存在属于前置参数错误，运行开始前直接失败（保持 404 语义）；
+    # 门禁拒绝与单指标运行期异常才在下面按实现/指标隔离，不中断整批。
+    available = {item["key"] for item in list_metrics(conn)}
+    missing = [key for key in keys if key not in available]
+    if missing:
+        raise NotFoundError(f"指标不存在: {', '.join(missing)}")
     tolerances = {"abs": float(abs_tolerance), "rel": float(rel_tolerance)}
     run_id = create_run(conn, keys, datasets_dir, tolerances)
     log_audit(conn, "run.started", f"run:{run_id}", "ok", {"metrics": keys})
     summary = {verdict: 0 for verdict in VERDICTS}
+    # 运行侧完整模式门禁：复用 import 侧同一个 SqlGate 模块，
+    # 内容哈希缓存保证文件被替换时在执行前被重新拦下。
+    gate = SqlGate(catalog.readonly_connection())
+    failed_metrics: list[dict[str, str]] = []
     try:
         for key in keys:
-            latest = get_latest(conn, key)
-            metric = MetricDefinition.from_dict(latest["definition"])
-            comparison, evaluations = run_metric(
-                metric,
-                int(latest["version"]),
-                catalog,
-                sql_roots,
-                timeout_seconds=timeout_seconds,
-                max_rows=max_rows,
-                abs_tolerance=abs_tolerance,
-                rel_tolerance=rel_tolerance,
-            )
-            save_snapshot(conn, run_id, metric, comparison, evaluations)
-            summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
+            try:
+                latest = get_latest(conn, key)
+                metric = MetricDefinition.from_dict(latest["definition"])
+                comparison, evaluations = run_metric(
+                    metric,
+                    int(latest["version"]),
+                    catalog,
+                    sql_roots,
+                    timeout_seconds=timeout_seconds,
+                    max_rows=max_rows,
+                    abs_tolerance=abs_tolerance,
+                    rel_tolerance=rel_tolerance,
+                    gate=gate,
+                    audit_conn=conn,
+                )
+                save_snapshot(conn, run_id, metric, comparison, evaluations)
+                summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
+                rejected = [
+                    {"impl_id": item.impl_id, "rule": (item.rejection_reason or {}).get("rule")}
+                    for item in evaluations.values()
+                    if item.rejected
+                ]
+                if rejected:
+                    summary.setdefault("rejected_impls", []).extend(
+                        {"metric_key": key, **item} for item in rejected
+                    )
+            except Exception as exc:
+                # 单指标失败不允许中断整批 run，也不回滚已入库的合法版本。
+                record_error(
+                    conn, "run.metric_failed", f"run:{run_id}", exc,
+                    extra={"metric_key": key},
+                )
+                failed_metrics.append({"metric_key": key, "error": str(exc)})
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id
+        summary["failed_metrics"] = failed_metrics
+        summary["gate_meta"] = GATE_META
         finish_run(conn, run_id, status="completed", summary=summary)
         log_audit(conn, "run.completed", f"run:{run_id}", "ok", summary)
         return run_id

@@ -1,75 +1,34 @@
 """Read-only SQL evaluation for metric implementations."""
 from __future__ import annotations
 
-import re
 import sqlite3
 import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from ..audit import log_audit
 from ..errors import EvaluationError, EvaluationTimeout, UnsafeSQLError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition
 from .comparator import compare_impl_results
 from .dsl_validator import resolve_sql_path
-
-FORBIDDEN = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|ATTACH|DETACH|PRAGMA|"
-    r"VACUUM|REINDEX|ANALYZE|TRIGGER|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|"
-    r"LOAD_EXTENSION)\b",
-    re.IGNORECASE,
-)
-START = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
-
-
-def _sanitized(sql: str) -> str:
-    """Remove comments and quoted literals before keyword checks."""
-    out: list[str] = []
-    index, length = 0, len(sql)
-    while index < length:
-        char, nxt = sql[index], sql[index + 1: index + 2]
-        if char == "-" and nxt == "-":
-            newline = sql.find("\n", index + 2)
-            index = length if newline < 0 else newline + 1
-        elif char == "/" and nxt == "*":
-            end = sql.find("*/", index + 2)
-            if end < 0:
-                raise UnsafeSQLError("SQL 块注释未闭合")
-            index = end + 2
-        elif char in {"'", '"', "`"}:
-            quote = char
-            index += 1
-            while index < length:
-                if sql[index] == quote:
-                    if sql[index + 1: index + 2] == quote:
-                        index += 2
-                        continue
-                    index += 1
-                    break
-                index += 1
-            else:
-                raise UnsafeSQLError("SQL 字符串或标识符引号未闭合")
-            out.append(" '' ")
-        else:
-            out.append(char)
-            index += 1
-    return "".join(out)
+from .sql_gate import GATE_META, AccessScope, SqlGate
 
 
 def validate_readonly_sql(sql: str) -> str:
-    """Return normalized SQL or raise when it is not a single SELECT query."""
+    """兼容入口：无连接降级模式下的只读校验，拒绝时抛 UnsafeSQLError。
+
+    完整判定（EXPLAIN 字节码 + 表级越权）见 :class:`sql_gate.SqlGate`，
+    导入与运行统一走该模块；本函数只保留给直接单元调用。
+    """
     if not isinstance(sql, str) or not sql.strip():
         raise UnsafeSQLError("SQL 不能为空")
-    code = _sanitized(sql).strip()
-    if code.endswith(";"):
-        code = code[:-1].rstrip()
-    if ";" in code:
-        raise UnsafeSQLError("不允许一次执行多条 SQL 语句")
-    if not START.match(code):
-        raise UnsafeSQLError("只允许 SELECT 或 WITH 查询")
-    match = FORBIDDEN.search(code)
-    if match:
-        raise UnsafeSQLError(f"禁止的 SQL 关键字: {match.group(1).upper()}")
+    decision = SqlGate(None).inspect_text(sql)
+    if not decision.allowed:
+        raise UnsafeSQLError(
+            decision.primary_violation.message,
+            details={"gate": decision.to_dict()},
+        )
     return sql.strip()
 
 
@@ -125,7 +84,6 @@ def evaluate_sql(
     impl_id: str = "impl",
 ) -> tuple[dict[str, float], int, float]:
     """Execute one query on a query-only connection with timeout and row cap."""
-    validated = validate_readonly_sql(sql)
     started = time.monotonic()
     deadline = started + max(0.001, float(timeout_seconds))
     conn.set_progress_handler(
@@ -136,7 +94,7 @@ def evaluate_sql(
         conn.rollback()
     try:
         conn.execute("BEGIN")
-        cursor = conn.execute(validated)
+        cursor = conn.execute(sql)
         description = cursor.description or []
         if not 1 <= len(description) <= 2:
             raise EvaluationError("查询必须返回 1 列（数值）或 2 列（维度, 数值）")
@@ -183,6 +141,26 @@ def evaluate_sql(
         conn.set_progress_handler(None, 0)
 
 
+def _rejected_evaluation(
+    impl: Any,
+    decision: Any,
+    reason: dict[str, Any],
+) -> ImplEvaluation:
+    return ImplEvaluation(
+        impl_id=impl.id,
+        source=impl.source,
+        sql_file=impl.sql_file,
+        values={},
+        row_count=0,
+        duration_ms=0.0,
+        rejected=True,
+        rejection_reason=reason,
+        gate_mode=decision.mode,
+        sql_sha256=decision.sql_sha256,
+        whitelisted=bool(decision.whitelisted),
+    )
+
+
 def evaluate_metric_impls(
     metric: MetricDefinition,
     version: int,
@@ -191,9 +169,13 @@ def evaluate_metric_impls(
     *,
     timeout_seconds: float = 5.0,
     max_rows: int = 10_000,
+    gate: SqlGate | None = None,
+    audit_conn: sqlite3.Connection | None = None,
 ) -> dict[str, ImplEvaluation]:
+    """逐个实现执行；单个实现被门禁拒绝时只标记该实现，不影响其他实现。"""
     results: dict[str, ImplEvaluation] = {}
     conn = catalog.readonly_connection()
+    gate = gate or SqlGate(conn)
     for impl in metric.impls:
         catalog.require(impl.source)
         sql_path = resolve_sql_path(impl.sql_file, sql_roots)
@@ -201,14 +183,82 @@ def evaluate_metric_impls(
             sql = sql_path.read_text(encoding="utf-8-sig")
         except OSError as exc:
             raise EvaluationError(f"无法读取 SQL 文件: {sql_path}: {exc}") from exc
-        values, row_count, duration = evaluate_sql(
-            conn,
+
+        # 运行前再核一次：即使导入时通过，文件被替换也会因哈希变化重新校验。
+        decision = gate.inspect_text(
             sql,
-            timeout_seconds=timeout_seconds,
-            max_rows=max_rows,
-            grain=metric.grain,
-            impl_id=impl.id,
+            access_scope=AccessScope.from_raw(impl.access),
+            allowlist=impl.allowlist,
+            context={
+                "metric_key": metric.key,
+                "impl_id": impl.id,
+                "sql_file": impl.sql_file,
+                "stage": "run",
+            },
         )
+        for passed in decision.whitelisted:
+            if audit_conn is not None:
+                log_audit(
+                    audit_conn,
+                    "sql_gate.whitelist",
+                    f"{metric.key}/{impl.id}",
+                    "ok",
+                    {
+                        "metric_key": metric.key,
+                        "impl_id": impl.id,
+                        "sql_file": impl.sql_file,
+                        "entry": passed.to_dict(),
+                        **decision.audit_summary(),
+                    },
+                )
+        if not decision.allowed:
+            reason = decision.rejection_reason() or {}
+            results[impl.id] = _rejected_evaluation(impl, decision, reason)
+            if audit_conn is not None:
+                log_audit(
+                    audit_conn,
+                    "sql_gate.rejected",
+                    f"{metric.key}/{impl.id}",
+                    "rejected",
+                    {
+                        "metric_key": metric.key,
+                        "impl_id": impl.id,
+                        "sql_file": impl.sql_file,
+                        "reason": reason,
+                        "gate": decision.to_dict(),
+                    },
+                )
+            continue
+
+        try:
+            values, row_count, duration = evaluate_sql(
+                conn,
+                sql,
+                timeout_seconds=timeout_seconds,
+                max_rows=max_rows,
+                grain=metric.grain,
+                impl_id=impl.id,
+            )
+        except EvaluationError as exc:
+            # 执行期错误同样按单实现隔离，避免整批 run 中断。
+            decision_context = decision.to_dict()
+            reason = {
+                "rule": exc.code,
+                "message": exc.message,
+                "statement_type": decision.statement_type,
+                "gate_mode": decision.mode,
+            }
+            results[impl.id] = _rejected_evaluation(impl, decision, reason)
+            if audit_conn is not None:
+                log_audit(
+                    audit_conn,
+                    "sql_gate.evaluation_failed",
+                    f"{metric.key}/{impl.id}",
+                    "error",
+                    {"metric_key": metric.key, "impl_id": impl.id, "error": str(exc),
+                     "gate": decision_context},
+                )
+            continue
         results[impl.id] = ImplEvaluation(
             impl_id=impl.id,
             source=impl.source,
@@ -216,6 +266,10 @@ def evaluate_metric_impls(
             values=values,
             row_count=row_count,
             duration_ms=round(duration, 3),
+            rejected=False,
+            gate_mode=decision.mode,
+            sql_sha256=decision.sql_sha256,
+            whitelisted=bool(decision.whitelisted),
         )
     return results
 
@@ -230,6 +284,8 @@ def run_metric(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    gate: SqlGate | None = None,
+    audit_conn: sqlite3.Connection | None = None,
 ) -> tuple[ComparisonResult, dict[str, ImplEvaluation]]:
     evaluations = evaluate_metric_impls(
         metric,
@@ -238,12 +294,50 @@ def run_metric(
         sql_roots,
         timeout_seconds=timeout_seconds,
         max_rows=max_rows,
+        gate=gate,
+        audit_conn=audit_conn,
     )
+    allowed = {
+        impl_id: item.values
+        for impl_id, item in evaluations.items()
+        if not item.rejected
+    }
+    if not allowed:
+        comparison = ComparisonResult(
+            metric_key=metric.key,
+            metric_version=version,
+            impl_ids=list(evaluations),
+            verdict="rejected",
+            dimensions=[],
+            diffs=[],
+            summary={
+                "impl_count": len(evaluations),
+                "rejected_impls": [
+                    item.rejection_reason or {}
+                    for item in evaluations.values()
+                    if item.rejected
+                ],
+                "gate_meta": GATE_META,
+            },
+            abs_tolerance=float(abs_tolerance),
+            rel_tolerance=float(rel_tolerance),
+        )
+        return comparison, evaluations
     comparison = compare_impl_results(
-        {impl_id: item.values for impl_id, item in evaluations.items()},
+        allowed,
         metric_key=metric.key,
         metric_version=version,
         abs_tolerance=abs_tolerance,
         rel_tolerance=rel_tolerance,
     )
+    # 把被拒实现与门禁元信息补进快照摘要，保留可追溯的拒绝原因。
+    rejected = [
+        {"impl_id": item.impl_id, "reason": item.rejection_reason,
+         "gate_mode": item.gate_mode, "sql_sha256": item.sql_sha256}
+        for item in evaluations.values()
+        if item.rejected
+    ]
+    if rejected:
+        comparison.summary["rejected_impls"] = rejected
+    comparison.summary["gate_meta"] = GATE_META
     return comparison, evaluations

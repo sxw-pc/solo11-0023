@@ -18,7 +18,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     run = get_run(conn, run_id)
     snapshots = snapshots_for_run(conn, run_id)
     metrics: list[dict[str, Any]] = []
-    counts = {"consistent": 0, "inconsistent": 0, "partial": 0}
+    counts = {"consistent": 0, "inconsistent": 0, "partial": 0, "rejected": 0}
     keys: set[str] = set()
     for snapshot in snapshots:
         result = snapshot["result"]
@@ -94,10 +94,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## 总览",
         "",
-        "| 指标数 | consistent | inconsistent | partial | 漂移事件 |",
-        "| --- | --- | --- | --- | --- |",
+        "| 指标数 | consistent | inconsistent | partial | rejected | 漂移事件 |",
+        "| --- | --- | --- | --- | --- | --- |",
         f"| {summary['metric_count']} | {summary['consistent']} | "
-        f"{summary['inconsistent']} | {summary['partial']} | {summary['drift_count']} |",
+        f"{summary['inconsistent']} | {summary['partial']} | "
+        f"{summary.get('rejected', 0)} | {summary['drift_count']} |",
         "",
         "## 指标明细",
         "",
@@ -113,15 +114,34 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"- 数据集：{', '.join(item['datasets'])}",
                 f"- 维度数：{item['summary'].get('dimension_count', 0)}",
                 "",
-                "| 实现 | 数据集 | 行数 | 耗时(ms) |",
-                "| --- | --- | --- | --- |",
+                "| 实现 | 数据集 | 行数 | 耗时(ms) | 状态 |",
+                "| --- | --- | --- | --- | --- |",
             ]
         )
         for impl in item["implementations"]:
+            if impl.get("rejected"):
+                reason = impl.get("rejection_reason") or {}
+                status = f"拒绝（{reason.get('rule', 'unsafe_sql')}）"
+            else:
+                status = "已执行"
             lines.append(
                 f"| {_cell(impl['impl_id'])} | {_cell(impl['source'])} | "
-                f"{impl['row_count']} | {impl['duration_ms']} |"
+                f"{impl['row_count']} | {impl['duration_ms']} | {status} |"
             )
+        rejected = [
+            impl for impl in item["implementations"] if impl.get("rejected")
+        ]
+        if rejected:
+            lines.append("")
+            lines.append("**门禁拒绝明细（已写入审计）**")
+            lines.append("")
+            for impl in rejected:
+                reason = impl.get("rejection_reason") or {}
+                lines.append(
+                    f"- `{impl['impl_id']}`（{impl['sql_file']}）："
+                    f"语句类型 {_cell(reason.get('statement_type'))}，"
+                    f"规则 `{_cell(reason.get('rule'))}`，{_cell(reason.get('message'))}"
+                )
         lines.append("")
         if item["diffs"]:
             lines.extend(
@@ -174,6 +194,7 @@ def render_html(report: dict[str, Any]) -> str:
         f"<p class=\"meta\">运行 #{report['run']['id']} · {html.escape(report['generated_at'])}</p>",
         f"<p>指标 {summary['metric_count']} 个；consistent {summary['consistent']}，"
         f"inconsistent {summary['inconsistent']}，partial {summary['partial']}，"
+        f"rejected {summary.get('rejected', 0)}，"
         f"漂移 {summary['drift_count']}。</p>",
         "<h2>指标明细</h2>",
     ]
@@ -188,14 +209,32 @@ def render_html(report: dict[str, Any]) -> str:
             f"{html.escape(item['unit'])} · 粒度 {html.escape(item['grain'])} · 数据集 "
             f"{html.escape(', '.join(item['datasets']))}</p>"
         )
-        parts.append("<table><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th></tr>")
+        parts.append("<table><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th><th>状态</th></tr>")
         for impl in item["implementations"]:
+            if impl.get("rejected"):
+                reason = impl.get("rejection_reason") or {}
+                status = html.escape(f"拒绝（{reason.get('rule', 'unsafe_sql')}）")
+            else:
+                status = "已执行"
             parts.append(
                 f"<tr><td>{html.escape(str(impl['impl_id']))}</td>"
                 f"<td>{html.escape(str(impl['source']))}</td><td>{impl['row_count']}</td>"
-                f"<td>{impl['duration_ms']}</td></tr>"
+                f"<td>{impl['duration_ms']}</td><td>{status}</td></tr>"
             )
         parts.append("</table>")
+        rejected = [impl for impl in item["implementations"] if impl.get("rejected")]
+        if rejected:
+            parts.append("<ul class=\"rejected\">")
+            for impl in rejected:
+                reason = impl.get("rejection_reason") or {}
+                parts.append(
+                    "<li>门禁拒绝 <code>" + html.escape(str(impl["impl_id"])) + "</code>（"
+                    + html.escape(str(impl["sql_file"])) + "）：语句类型 "
+                    + html.escape(str(reason.get("statement_type"))) + "，规则 <code>"
+                    + html.escape(str(reason.get("rule"))) + "</code>，"
+                    + html.escape(str(reason.get("message"))) + "</li>"
+                )
+            parts.append("</ul>")
         if item["diffs"]:
             parts.append("<table><tr><th>维度</th><th>类型</th>")
             for impl_id in item["impl_ids"]:

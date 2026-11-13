@@ -14,6 +14,7 @@ from app.core.dataset_loader import load_catalog
 from app.core.registry import MetricRegistry
 from app.core.reporter import build_report, export_report
 from app.core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
+from app.core.sql_gate import SqlGate
 from app.db import init_db
 from app.errors import CaliberError
 
@@ -79,11 +80,37 @@ def _import_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Conn
     if sibling.is_dir():
         extra.append(sibling)
     roots = config.merged_sql_roots(*extra)
-    summary = MetricRegistry(conn, roots).import_directory(directory)
+    # 尽量用数据目录构造完整模式门禁（EXPLAIN + 表级越权）；
+    # 数据目录不可用时 SqlGate 自动降级为语句前缀/结构校验。
+    gate = SqlGate(None)
+    catalog = None
+    try:
+        try:
+            catalog = load_catalog(config.datasets_dir)
+            gate = SqlGate.from_catalog(catalog)
+        except CaliberError:
+            pass
+        registry = MetricRegistry(conn, roots, gate=gate)
+        summary = registry.import_directory(directory)
+    finally:
+        gate.close()
+        if catalog is not None:
+            catalog.close()
     for item in summary.imported:
         print(f"导入 {item.key} v{item.version}（{item.name}）")
     for error in summary.errors:
         print(f"失败 {error['file']}: [{error['error']}] {error['message']}", file=sys.stderr)
+        for detail in error.get("details", []):
+            print(
+                f"  - {detail.get('field')}: {detail.get('code')}: {detail.get('message')}",
+                file=sys.stderr,
+            )
+    stats = summary.gate_stats
+    if stats:
+        print(
+            "门禁：模式 {mode}，检查 {inspected} 条实现，拒绝 {rejected} 条，"
+            "白名单放行 {whitelisted} 条".format(**stats)
+        )
     print(f"完成：成功 {len(summary.imported)}，失败 {len(summary.errors)}")
     return 0 if summary.ok else 1
 
@@ -110,6 +137,13 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
     print(f"运行 #{run_id} 完成：{json.dumps(run['summary'], ensure_ascii=False)}")
     for snapshot in snapshots_for_run(conn, run_id):
         print(f"- {snapshot['metric_key']} v{snapshot['metric_version']}: {snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})")
+        for impl in snapshot["result"].get("implementations", []):
+            if impl.get("rejected"):
+                reason = impl.get("rejection_reason") or {}
+                print(
+                    f"  拒绝实现 {impl['impl_id']}: "
+                    f"[{reason.get('rule')}] {reason.get('message')}"
+                )
     print(f"导出报告: python -m app report --run-id {run_id} --format md")
     return 0
 

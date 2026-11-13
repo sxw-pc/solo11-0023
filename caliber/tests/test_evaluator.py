@@ -122,3 +122,39 @@ def test_run_metric_on_fixtures(
     comparison, _ = run_metric(metric, 1, catalog, sql_roots)
     assert comparison.verdict == "consistent"
 
+
+def test_validate_readonly_sql_compat_entrypoint_rejects_writes():
+    from app.core.sql_gate import SqlGate
+
+    # 兼容入口走无连接降级模式，仍能识别全部非只读前缀。
+    for sql in [
+        "DELETE FROM users_a",
+        "DROP TABLE users_a",
+        "PRAGMA table_info(users_a)",
+        "ATTACH DATABASE 'x.db' AS o",
+        "WITH x AS (SELECT 1) DELETE FROM users_a",
+    ]:
+        with pytest.raises(UnsafeSQLError):
+            validate_readonly_sql(sql)
+    assert validate_readonly_sql("SELECT 1") == "SELECT 1"
+    # 与门禁模块判定保持一致。
+    assert SqlGate(None).inspect_text("SELECT 1").allowed
+
+
+def test_run_metric_isolates_rejected_impl_and_keeps_others(
+    catalog: DatasetCatalog, fixture_tree: Path, sql_roots: tuple[Path, ...]
+):
+    metric = parse_metric_file(fixture_tree / "metrics" / "active_users.yaml")
+    # fixture_tree 是每测试独立拷贝，直接在受信任目录内放危险文件。
+    danger = sql_roots[0] / "danger_impl.sql"
+    danger.write_text("DELETE FROM users_a", encoding="utf-8")
+    metric.impls[1].sql_file = "danger_impl.sql"
+    comparison, evaluations = run_metric(metric, 1, catalog, sql_roots)
+    assert evaluations["impl_a"].rejected is False
+    assert evaluations["impl_b"].rejected is True
+    assert evaluations["impl_b"].rejection_reason["statement_type"] == "DELETE"
+    # 单实现被拒后仍可基于剩余实现产出判定，不抛异常中断。
+    assert comparison.verdict == "consistent"
+    assert comparison.summary["rejected_impls"][0]["impl_id"] == "impl_b"
+    assert comparison.summary["gate_meta"]["architecture"] == "independent_module"
+

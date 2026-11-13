@@ -1,6 +1,7 @@
 """YAML metric-definition parser with field-level diagnostics."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -10,11 +11,84 @@ from ..errors import DslParseError
 from ..models import ImplementDef, MetricDefinition, ValidationIssue
 
 TOP_FIELDS = {"key", "name", "owner", "description", "unit", "grain", "impls"}
-IMPL_FIELDS = {"id", "source", "sql_file"}
+IMPL_FIELDS = {"id", "source", "sql_file", "access", "allowlist"}
+_ACCESS_TABLES_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _issue(field: str, code: str, message: str) -> ValidationIssue:
     return ValidationIssue(field=field, code=code, message=message)
+
+
+def _parse_access(raw: Any, field_name: str,
+                  issues: list[ValidationIssue]) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        issues.append(_issue(field_name, "type", "access 必须是映射"))
+        return None
+    access: dict[str, Any] = {}
+    tables = raw.get("tables")
+    if tables is not None:
+        if not isinstance(tables, list) or not tables or not all(
+            isinstance(item, str) and _ACCESS_TABLES_PATTERN.fullmatch(item.strip())
+            for item in tables
+        ):
+            issues.append(
+                _issue(f"{field_name}.tables", "type",
+                       "access.tables 必须是非空字符串数组，元素为合法表名")
+            )
+        else:
+            access["tables"] = [item.strip() for item in tables]
+    master = raw.get("sqlite_master", False)
+    if not isinstance(master, bool):
+        issues.append(
+            _issue(f"{field_name}.sqlite_master", "type",
+                   "access.sqlite_master 必须是布尔值")
+        )
+    else:
+        access["sqlite_master"] = master
+    unknown = sorted(set(raw) - {"tables", "sqlite_master"})
+    if unknown:
+        issues.append(
+            _issue(field_name, "unknown", f"access 未知字段: {', '.join(unknown)}")
+        )
+    return access or None
+
+
+def _parse_allowlist(raw: Any, field_name: str,
+                     issues: list[ValidationIssue]) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        issues.append(
+            _issue(field_name, "type", "allowlist 必须是数组")
+        )
+        return []
+    entries: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        entry_field = f"{field_name}[{index}]"
+        if not isinstance(item, Mapping):
+            issues.append(_issue(entry_field, "type", "白名单条目必须是映射"))
+            continue
+        rule = item.get("rule")
+        if not isinstance(rule, str) or not rule.strip():
+            issues.append(
+                _issue(f"{entry_field}.rule", "required", "白名单条目必须声明 rule")
+            )
+            continue
+        entry = {"rule": rule.strip(), "reason": str(item.get("reason", "")).strip()}
+        if "statement_type" in item:
+            entry["statement_type"] = str(item["statement_type"]).strip().upper()
+        if "table" in item:
+            entry["table"] = str(item["table"]).strip()
+        unknown = sorted(set(item) - {"rule", "reason", "statement_type", "table"})
+        if unknown:
+            issues.append(
+                _issue(entry_field, "unknown",
+                       f"白名单条目未知字段: {', '.join(unknown)}")
+            )
+        entries.append(entry)
+    return entries
 
 
 def _parse_impls(raw: Any, issues: list[ValidationIssue]) -> list[ImplementDef]:
@@ -38,8 +112,16 @@ def _parse_impls(raw: Any, issues: list[ValidationIssue]) -> list[ImplementDef]:
                 values[name] = ""
             else:
                 values[name] = value.strip()
+        access = _parse_access(item.get("access"), f"{field_name}.access", issues)
+        allowlist = _parse_allowlist(item.get("allowlist"), f"{field_name}.allowlist", issues)
         result.append(
-            ImplementDef(id=values["id"], source=values["source"], sql_file=values["sql_file"])
+            ImplementDef(
+                id=values["id"],
+                source=values["source"],
+                sql_file=values["sql_file"],
+                access=access,
+                allowlist=allowlist,
+            )
         )
     return result
 
