@@ -5,6 +5,7 @@ import csv
 import io
 import re
 import sqlite3
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
@@ -101,9 +102,20 @@ class DatasetCatalog:
 
     def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory).resolve()
-        self._conn = sqlite3.connect(":memory:")
+        # check_same_thread=False: the loading connection is only ever touched
+        # by catalog internals (loads are finished before any worker starts, and
+        # connection backups are serialized by ``_clones_lock``).  This allows
+        # worker read-only clones to be provisioned from the run-driving thread.
+        self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._readonly: sqlite3.Connection | None = None
+        # Independent read-only connections handed out to concurrent workers.
+        # Clones are created up-front (the in-memory backup must run on the
+        # loading thread that owns ``_conn``) and checked out per worker; the
+        # catalog closes every clone on shutdown even if a worker misbehaves.
+        self._idle_clones: list[sqlite3.Connection] = []
+        self._active_clones: set[sqlite3.Connection] = set()
+        self._clones_lock = threading.Lock()
         self.datasets: dict[str, DatasetMeta] = {}
         try:
             self._load_directory()
@@ -160,11 +172,60 @@ class DatasetCatalog:
 
     def readonly_connection(self) -> sqlite3.Connection:
         if self._readonly is None:
-            self._readonly = sqlite3.connect(":memory:")
-            self._readonly.row_factory = sqlite3.Row
-            self._conn.backup(self._readonly)
-            self._readonly.execute("PRAGMA query_only = ON")
+            self._readonly = self._make_readonly_clone()
         return self._readonly
+
+    def _build_clone_locked(self) -> sqlite3.Connection:
+        # Caller must hold ``_clones_lock``; the backup touches the shared
+        # in-memory source connection and must be serialized across threads.
+        clone = sqlite3.connect(":memory:", check_same_thread=False)
+        clone.row_factory = sqlite3.Row
+        self._conn.backup(clone)
+        clone.execute("PRAGMA query_only = ON")
+        return clone
+
+    def _make_readonly_clone(self) -> sqlite3.Connection:
+        # check_same_thread=False is safe here: each clone is handed to exactly
+        # one worker thread for its whole lifetime, and query_only blocks writes.
+        with self._clones_lock:
+            return self._build_clone_locked()
+
+    def provision_worker_connections(self, count: int) -> None:
+        """Pre-create ``count`` worker clones (backup serialized by the lock)."""
+        with self._clones_lock:
+            current = len(self._idle_clones) + len(self._active_clones)
+            for _ in range(max(0, int(count) - current)):
+                self._idle_clones.append(self._build_clone_locked())
+
+    def acquire_worker_connection(self) -> sqlite3.Connection:
+        """Check out a private read-only connection for one worker."""
+        with self._clones_lock:
+            if self._idle_clones:
+                clone = self._idle_clones.pop()
+            else:
+                # Fallback for callers that did not provision up-front.
+                clone = self._build_clone_locked()
+            self._active_clones.add(clone)
+        return clone
+
+    def release_worker_connection(self, conn: sqlite3.Connection) -> None:
+        """Return one worker connection to the pool; idempotent and safe."""
+        with self._clones_lock:
+            if conn not in self._active_clones:
+                return
+            self._active_clones.discard(conn)
+            self._idle_clones.append(conn)
+
+    @property
+    def active_worker_connections(self) -> int:
+        """Number of clones currently checked out (used by tests)."""
+        with self._clones_lock:
+            return len(self._active_clones)
+
+    @property
+    def total_worker_connections(self) -> int:
+        with self._clones_lock:
+            return len(self._idle_clones) + len(self._active_clones)
 
     def preview(self, key: str, limit: int = 10) -> dict[str, Any]:
         meta = self.require(key)
@@ -175,6 +236,15 @@ class DatasetCatalog:
         return {"meta": meta.to_dict(), "rows": [dict(row) for row in rows]}
 
     def close(self) -> None:
+        with self._clones_lock:
+            clones = list(self._idle_clones) + list(self._active_clones)
+            self._idle_clones.clear()
+            self._active_clones.clear()
+        for clone in clones:
+            try:
+                clone.close()
+            except sqlite3.Error:
+                pass
         if self._readonly is not None:
             self._readonly.close()
             self._readonly = None

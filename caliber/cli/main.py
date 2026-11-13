@@ -13,7 +13,12 @@ from app.config import Config
 from app.core.dataset_loader import load_catalog
 from app.core.registry import MetricRegistry
 from app.core.reporter import build_report, export_report
-from app.core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
+from app.core.snapshot import (
+    get_run,
+    list_runs,
+    perform_run,
+    run_items_for_run,
+)
 from app.db import init_db
 from app.errors import CaliberError
 
@@ -38,6 +43,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--datasets", type=Path, help="CSV 数据集目录")
     run.add_argument("--abs-tol", type=float, default=None, help="绝对容差")
     run.add_argument("--rel-tol", type=float, default=None, help="相对容差")
+    run.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="并发执行的规则数上限，默认取配置（CALIBER_MAX_WORKERS，默认 4）；1 为串行",
+    )
+    run.add_argument(
+        "--resume",
+        action="store_true",
+        help="重跑模式：跳过同清单上一次运行已成功的规则，只补跑失败和未执行的规则",
+    )
     run.set_defaults(handler=_run)
 
     report = sub.add_parser("report", help="导出比对报告")
@@ -91,6 +107,7 @@ def _import_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Conn
 def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
     datasets_dir = (args.datasets or config.datasets_dir).expanduser().resolve()
     keys = [item.strip() for item in args.metrics.split(",") if item.strip()] if args.metrics else None
+    max_workers = args.max_workers if args.max_workers is not None else config.eval_max_workers
     catalog = load_catalog(datasets_dir)
     try:
         run_id = perform_run(
@@ -103,13 +120,27 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
             max_rows=config.max_result_rows,
             abs_tolerance=config.abs_tolerance if args.abs_tol is None else args.abs_tol,
             rel_tolerance=config.rel_tolerance if args.rel_tol is None else args.rel_tol,
+            max_workers=max_workers,
+            resume=bool(args.resume),
         )
     finally:
         catalog.close()
     run = get_run(conn, run_id)
     print(f"运行 #{run_id} 完成：{json.dumps(run['summary'], ensure_ascii=False)}")
-    for snapshot in snapshots_for_run(conn, run_id):
-        print(f"- {snapshot['metric_key']} v{snapshot['metric_version']}: {snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})")
+    items = run_items_for_run(conn, run_id)
+    for item in items:
+        if item["status"] == "success":
+            detail = item["verdict"]
+        elif item["status"] == "skipped":
+            detail = f"skipped（沿用快照 #{item['snapshot_id']}）"
+        else:
+            detail = f"failed: [{item['error_code']}] {item['error']}"
+        print(
+            f"- {item['metric_key']}: {item['status']} ({detail}, "
+            f"{item['duration_ms']:.1f}ms, worker={item['worker'] or '-'})"
+        )
+    if run["status"] == "completed_with_errors":
+        print("存在失败规则：成功结果已保留，可加 --resume 只补跑失败项。", file=sys.stderr)
     print(f"导出报告: python -m app report --run-id {run_id} --format md")
     return 0
 

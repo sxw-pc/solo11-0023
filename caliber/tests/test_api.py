@@ -114,6 +114,93 @@ def test_run_with_tolerance_fields(imported_client, app_config):
     assert response.status_code == 400
 
 
+def test_run_accepts_max_workers_and_returns_per_rule_items(imported_client, app_config):
+    response = imported_client.post(
+        "/api/runs",
+        json={
+            "metrics": ["active_users", "conversion_rate", "avg_order_value"],
+            "datasets_dir": str(app_config.datasets_dir),
+            "max_workers": 2,
+        },
+    )
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["run"]["summary"]["max_workers"] == 2
+    assert payload["run"]["summary"]["peak_workers"] <= 2
+    items = payload["items"]
+    assert [item["position"] for item in items] == [0, 1, 2]
+    assert all(item["status"] == "success" for item in items)
+    assert {item["worker"] for item in items}  # workers were recorded
+    # Detail endpoint also exposes the per-rule items.
+    detail = imported_client.get(f"/api/runs/{payload['run']['id']}")
+    assert len(detail.get_json()["items"]) == 3
+
+
+def test_run_rejects_invalid_max_workers(imported_client, app_config):
+    response = imported_client.post(
+        "/api/runs",
+        json={
+            "metrics": ["active_users"],
+            "datasets_dir": str(app_config.datasets_dir),
+            "max_workers": 0,
+        },
+    )
+    assert response.status_code == 400
+    response = imported_client.post(
+        "/api/runs",
+        json={
+            "metrics": ["active_users"],
+            "datasets_dir": str(app_config.datasets_dir),
+            "max_workers": "many",
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_run_resume_skips_succeeded_rules(imported_client, app_config, monkeypatch):
+    from app.core import snapshot as snapshot_module
+
+    real_run_metric = snapshot_module.run_metric
+
+    def flaky(metric, version, catalog, roots, **kwargs):
+        if metric.key == "avg_order_value" and not flaky.failed:
+            flaky.failed = True
+            from app.errors import EvaluationError
+
+            raise EvaluationError("首轮注入失败")
+        return real_run_metric(metric, version, catalog, roots, **kwargs)
+
+    flaky.failed = False
+    monkeypatch.setattr(snapshot_module, "run_metric", flaky)
+
+    first = imported_client.post(
+        "/api/runs",
+        json={
+            "metrics": ["active_users", "avg_order_value"],
+            "datasets_dir": str(app_config.datasets_dir),
+            "max_workers": 2,
+        },
+    ).get_json()
+    first_items = {item["metric_key"]: item for item in first["items"]}
+    assert first_items["avg_order_value"]["status"] == "failed"
+    assert first["run"]["status"] == "completed_with_errors"
+
+    second = imported_client.post(
+        "/api/runs",
+        json={
+            "metrics": ["active_users", "avg_order_value"],
+            "datasets_dir": str(app_config.datasets_dir),
+            "max_workers": 2,
+            "resume": True,
+        },
+    ).get_json()
+    second_items = {item["metric_key"]: item for item in second["items"]}
+    assert second_items["active_users"]["status"] == "skipped"
+    assert second_items["avg_order_value"]["status"] == "success"
+    assert second["run"]["status"] == "completed"
+    assert second["run"]["summary"]["skipped"] == 1
+
+
 def test_web_pages_are_local_and_render(imported_client, app_config):
     home = imported_client.get("/")
     assert home.status_code == 200

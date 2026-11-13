@@ -7,7 +7,13 @@ from typing import Any
 from flask import Blueprint, current_app, g, jsonify, request
 
 from ..core.dataset_loader import load_catalog
-from ..core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
+from ..core.snapshot import (
+    get_run,
+    list_runs,
+    perform_run,
+    run_items_for_run,
+    snapshots_for_run,
+)
 from ..errors import CaliberError
 
 bp = Blueprint("api_runs", __name__, url_prefix="/api/runs")
@@ -34,6 +40,18 @@ def _tolerance(payload: dict[str, Any], name: str, default: float) -> float:
     return result
 
 
+def _max_workers(payload: dict[str, Any], default: int) -> int:
+    if "max_workers" not in payload or payload["max_workers"] is None:
+        return int(default)
+    try:
+        value = int(payload["max_workers"])
+    except (TypeError, ValueError) as exc:
+        raise CaliberError("max_workers 必须是正整数") from exc
+    if value < 1:
+        raise CaliberError("max_workers 必须 >= 1")
+    return value
+
+
 @bp.post("")
 def create_run():
     payload = request.get_json(silent=True)
@@ -44,6 +62,8 @@ def create_run():
     config = current_app.config["CALIBER"]
     keys = _metric_keys(payload)
     datasets_dir = Path(payload.get("datasets_dir") or config.datasets_dir).expanduser().resolve()
+    max_workers = _max_workers(payload, config.eval_max_workers)
+    resume = bool(payload.get("resume", False))
     catalog = load_catalog(datasets_dir)
     try:
         run_id = perform_run(
@@ -56,11 +76,22 @@ def create_run():
             max_rows=config.max_result_rows,
             abs_tolerance=_tolerance(payload, "abs", config.abs_tolerance),
             rel_tolerance=_tolerance(payload, "rel", config.rel_tolerance),
+            max_workers=max_workers,
+            resume=resume,
         )
     finally:
         catalog.close()
     run = get_run(g.db, run_id)
-    return jsonify({"run": run, "snapshots": snapshots_for_run(g.db, run_id)}), 201
+    return (
+        jsonify(
+            {
+                "run": run,
+                "snapshots": snapshots_for_run(g.db, run_id),
+                "items": run_items_for_run(g.db, run_id),
+            }
+        ),
+        201,
+    )
 
 
 @bp.get("")
@@ -76,4 +107,10 @@ def get_runs():
 @bp.get("/<int:run_id>")
 def get_run_detail(run_id: int):
     run = get_run(g.db, run_id)
-    return jsonify({"run": run, "snapshots": snapshots_for_run(g.db, run_id)})
+    return jsonify(
+        {
+            "run": run,
+            "snapshots": snapshots_for_run(g.db, run_id),
+            "items": run_items_for_run(g.db, run_id),
+        }
+    )

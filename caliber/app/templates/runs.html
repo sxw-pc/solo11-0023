@@ -71,13 +71,20 @@
           <td><span class="pill {{ run.status }}">{{ run.status }}</span></td>
           <td>{{ run.metrics | join(', ') }}</td>
           <td>
-            {% for snap in run.snapshots %}
-              <span class="pill {{ snap.verdict }}">{{ snap.metric_key }}: {{ snap.verdict }}</span>
+            {% for item in run.items %}
+              {% if item.status == 'success' %}
+                <span class="pill {{ item.verdict }}">{{ item.metric_key }}: {{ item.verdict }}</span>
+              {% elif item.status == 'skipped' %}
+                <span class="pill partial">{{ item.metric_key }}: skipped</span>
+              {% else %}
+                <span class="pill failed" title="{{ item.error }}">{{ item.metric_key }}: failed</span>
+              {% endif %}
+            {% else %}
+              <span class="muted">-</span>
             {% endfor %}
-            {% if not run.snapshots %}<span class="muted">-</span>{% endif %}
           </td>
           <td class="muted">{{ run.started_at }}</td>
-          <td>{% if run.status == 'completed' %}<a class="quiet" href="/reports/{{ run.id }}">报告</a>{% endif %}</td>
+          <td>{% if run.status in ('completed', 'completed_with_errors') %}<a class="quiet" href="/reports/{{ run.id }}">报告</a>{% endif %}</td>
         </tr>
       {% endfor %}
       </tbody>

@@ -191,9 +191,13 @@ def evaluate_metric_impls(
     *,
     timeout_seconds: float = 5.0,
     max_rows: int = 10_000,
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, ImplEvaluation]:
     results: dict[str, ImplEvaluation] = {}
-    conn = catalog.readonly_connection()
+    # When a worker-private connection is supplied it is owned/closed by the
+    # caller's worker scope; otherwise fall back to the shared catalog one so
+    # the serial call path keeps working unchanged.
+    conn = connection if connection is not None else catalog.readonly_connection()
     for impl in metric.impls:
         catalog.require(impl.source)
         sql_path = resolve_sql_path(impl.sql_file, sql_roots)
@@ -230,6 +234,7 @@ def run_metric(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    connection: sqlite3.Connection | None = None,
 ) -> tuple[ComparisonResult, dict[str, ImplEvaluation]]:
     evaluations = evaluate_metric_impls(
         metric,
@@ -238,6 +243,7 @@ def run_metric(
         sql_roots,
         timeout_seconds=timeout_seconds,
         max_rows=max_rows,
+        connection=connection,
     )
     comparison = compare_impl_results(
         {impl_id: item.values for impl_id, item in evaluations.items()},

@@ -85,6 +85,8 @@ def create_app(config: Config | None = None) -> Flask:
 
     @app.get("/runs")
     def runs_page():
+        from .core.snapshot import run_items_for_run
+
         runs = []
         for run in list_runs(g.db, 30):
             run["snapshots"] = [
@@ -95,6 +97,7 @@ def create_app(config: Config | None = None) -> Flask:
                 }
                 for item in snapshots_for_run(g.db, run["id"])
             ]
+            run["items"] = run_items_for_run(g.db, run["id"])
             runs.append(run)
         return render_template("runs.html", runs=runs, metrics=versioning.list_metrics(g.db))
 

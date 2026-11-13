@@ -74,7 +74,8 @@ td small { display:block; color:var(--muted); }
   font-weight:700; background:#edf2f6; color:#425466; white-space:nowrap; }
 .pill.consistent, .pill.completed, .pill.ok { background:var(--green-soft); color:var(--green); }
 .pill.inconsistent, .pill.failed, .pill.error { background:var(--red-soft); color:var(--red); }
-.pill.partial, .pill.running { background:var(--amber-soft); color:var(--amber); }
+.pill.partial, .pill.running, .pill.completed_with_errors { background:var(--amber-soft); color:var(--amber); }
+.pill.skipped { background:var(--amber-soft); color:var(--amber); }
 .tag { display:inline-block; background:#f1f5f8; color:#516171; border-radius:4px;
   padding:1px 5px; margin:1px 3px 1px 0; font-family:ui-monospace,Consolas,monospace; font-size:11px; }
 .run-list { list-style:none; margin:0; padding:0; display:grid; gap:10px; }

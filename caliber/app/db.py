@@ -54,6 +54,22 @@ CREATE TABLE IF NOT EXISTS snapshots (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS run_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    metric_key TEXT NOT NULL,
+    metric_version INTEGER,
+    status TEXT NOT NULL,
+    verdict TEXT,
+    snapshot_id INTEGER,
+    error TEXT,
+    error_code TEXT,
+    duration_ms REAL NOT NULL DEFAULT 0,
+    worker TEXT,
+    UNIQUE(run_id, position)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -66,6 +82,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_versions_key ON metric_versions(metric_key, version DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_key ON snapshots(metric_key, id DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_run ON snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_run_items_run ON run_items(run_id, position);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
 """
 
@@ -89,7 +106,7 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
 
 
 def table_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    tables = ("metrics", "metric_versions", "runs", "snapshots", "audit_log")
+    tables = ("metrics", "metric_versions", "runs", "snapshots", "run_items", "audit_log")
     return {name: int(conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0])
             for name in tables}
 

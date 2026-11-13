@@ -38,8 +38,13 @@ pip install -r requirements.txt
 python -m app import-metrics --dir fixtures/metrics
 
 # 2) 执行一次全量比对：两套数据源上同名指标的一致性
+# --max-workers 控制并发上限（默认 4，设为 1 即退化为串行）
 python -m app run --metrics active_users,conversion_rate,avg_order_value \
-  --datasets fixtures/datasets
+  --datasets fixtures/datasets --max-workers 4
+
+# 2b) 重跑：跳过同清单上一次运行已成功的规则，只补跑失败和未执行的规则
+python -m app run --metrics active_users,conversion_rate,avg_order_value \
+  --datasets fixtures/datasets --resume
 
 # 3) 导出最近一次运行的 Markdown 报告
 python -m app report --last --format md
@@ -175,9 +180,16 @@ caliber/
 {
   "metrics": ["active_users", "avg_order_value"],
   "datasets_dir": "fixtures/datasets",
-  "tolerances": {"abs": 0.000001, "rel": 0}
+  "tolerances": {"abs": 0.000001, "rel": 0},
+  "max_workers": 4,
+  "resume": false
 }
 ```
+
+- `max_workers`：单次运行内并发求值的规则数上限，正整数，默认取配置（环境变量 `CALIBER_MAX_WORKERS`，默认 `4`）。超出上限的规则在有界信号量上排队，不会无界占用内存或句柄；设为 `1` 时行为与历史串行完全一致。
+- `resume`：`true` 时按相同规则清单找到最近一次非失败运行，跳过其中已成功的规则（沿用其快照），只补跑失败和未执行的规则。
+- 响应在 `run` / `snapshots` 之外新增 `items`：按输入顺序给出每条规则的最终状态（`success` / `failed` / `skipped`）、判定、错误码、耗时与执行它的 worker。
+- 单条规则失败不再中止整批：运行状态为 `completed_with_errors`，成功结果已落盘保留；全部规则成功才是 `completed`。
 
 ## 7. 安全与合规
 
@@ -202,11 +214,21 @@ caliber/
 
 当前限制：
 
-- 单进程同步执行，一个运行内按指标串行求值。
+- 单次运行内规则级有界并发（线程池 + 信号量，默认上限 4）；每个 worker 使用独立的只读内存 SQLite 连接，进程内不做跨机器分布式调度。
 - CSV 全量加载到内存 SQLite；超大文件不适合。
 - SQL 结果契约固定为 1–2 列；多维度组合需要预先拼成一个维度列。
 - 漂移只检测相邻快照的 `consistent → inconsistent`，不检测版本定义差异引起的语义漂移。
 - 无用户、权限、调度、告警和报告持久化文件管理。
 - 报告 HTML 是独立静态字符串，和本地页面不是同一模板系统。
 
-后续可迭代：SQL 结果多列维度、指标依赖与血缘、批处理队列、更多离线数据源适配器、报告归档目录、版本升级时的口径审批流。当前版本有意不包含这些能力。
+### 9.1 并发、排队与失败隔离的协同
+
+批量执行入口（`app/core/executor.py` 的 `ConcurrentRuleExecutor` + `app/core/snapshot.py` 的 `perform_run`）保证三者协同：
+
+- **有界并发**：线程池大小与 `BoundedSemaphore` 许可数都等于 `max_workers`，规则在执行前先获取许可，因此同时存活的求值（以及每个 worker 私有的只读连接）数量不可能超过配置峰值；拿不到许可的规则 FIFO 排队，而不是一次性物化所有任务。
+- **失败隔离**：每条规则的异常被捕获进自己的 `run_items` 记录（含 `error_code`、错误信息、耗时、worker），不会外溢中止其他规则，也不会销毁线程池；硬失败（如清单内所有指标都不存在）仍在开工前直接报错，保持与串行路径一致。
+- **资源回收**：worker 作用域在惰性创建时从 catalog 预建连接池取连接，在池排空时通过 `finally` 归还；无论正常结束、规则失败、消费方提前中断还是 `KeyboardInterrupt`，都会先协作式取消、`shutdown(wait=True)` 回收线程，再逐一关闭作用域，因此一条卡死或失败的规则无法长期占满并发池，结束后不存在残留执行器或连接。
+- **可重跑**：每条规则的终态落在 `run_items` 表；`--resume` / `resume:true` 只补跑非 `success` 的规则，已成功规则标记为 `skipped` 并沿用上一轮快照，成功结果不会在重跑时丢失。
+- 输出顺序始终按输入清单排序，判定结果与串行执行一致。
+
+后续可迭代：SQL 结果多列维度、指标依赖与血缘、更多离线数据源适配器、报告归档目录、版本升级时的口径审批流。

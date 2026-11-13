@@ -9,7 +9,12 @@ from typing import Any
 from ..audit import list_audit
 from ..errors import ReportError
 from ..models import utc_now
-from .snapshot import detect_drift, get_run, snapshots_for_run
+from .snapshot import (
+    detect_drift,
+    get_run,
+    run_items_for_run,
+    snapshots_for_run,
+)
 
 FORMATS = ("json", "md", "html")
 
@@ -52,6 +57,10 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     drift_events: list[dict[str, Any]] = []
     for key in sorted(keys):
         drift_events.extend(detect_drift(conn, key))
+    items = run_items_for_run(conn, run_id)
+    item_counts = {"success": 0, "failed": 0, "skipped": 0}
+    for item in items:
+        item_counts[item["status"]] = item_counts.get(item["status"], 0) + 1
     return {
         "report_version": "1.0",
         "generated_at": utc_now(),
@@ -60,8 +69,12 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
             "metric_count": len(metrics),
             **counts,
             "drift_count": len(drift_events),
+            "rule_succeeded": item_counts["success"],
+            "rule_failed": item_counts["failed"],
+            "rule_skipped": item_counts["skipped"],
         },
         "metrics": metrics,
+        "items": items,
         "drift_events": drift_events,
         "audit": list_audit(conn, 50),
     }
@@ -141,6 +154,21 @@ def render_markdown(report: dict[str, Any]) -> str:
                     f"{_cell(diff.get('max_delta'))} |"
                 )
             lines.append("")
+    lines.extend(["## 规则执行状态", ""])
+    lines.extend(
+        [
+            "| # | 指标 | 状态 | 判定 | 耗时(ms) | 工作线程 | 错误 |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in report["items"]:
+        lines.append(
+            f"| {item['position'] + 1} | {_cell(item['metric_key'])} | "
+            f"{_cell(item['status'])} | {_cell(item.get('verdict') or '-')} | "
+            f"{item['duration_ms']:.1f} | {_cell(item.get('worker') or '-')} | "
+            f"{_cell(item.get('error') or '')} |"
+        )
+    lines.append("")
     lines.extend(["## 漂移事件", ""])
     if report["drift_events"]:
         for event in report["drift_events"]:
@@ -210,6 +238,22 @@ def render_html(report: dict[str, Any]) -> str:
                     parts.append(f"<td>{html.escape(_cell(diff['values'].get(impl_id)))}</td>")
                 parts.append(f"<td>{html.escape(_cell(diff.get('max_delta')))}</td></tr>")
             parts.append("</table>")
+    parts.append("<h2>规则执行状态</h2>")
+    parts.append(
+        "<table><tr><th>#</th><th>指标</th><th>状态</th><th>判定</th>"
+        "<th>耗时(ms)</th><th>工作线程</th><th>错误</th></tr>"
+    )
+    for item in report["items"]:
+        parts.append(
+            f"<tr><td>{item['position'] + 1}</td>"
+            f"<td>{html.escape(str(item['metric_key']))}</td>"
+            f"<td>{html.escape(str(item['status']))}</td>"
+            f"<td>{html.escape(str(item.get('verdict') or '-'))}</td>"
+            f"<td>{item['duration_ms']:.1f}</td>"
+            f"<td>{html.escape(str(item.get('worker') or '-'))}</td>"
+            f"<td>{html.escape(str(item.get('error') or ''))}</td></tr>"
+        )
+    parts.append("</table>")
     parts.append("<h2>漂移事件</h2>")
     if report["drift_events"]:
         parts.append("<ul>")

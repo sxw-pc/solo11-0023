@@ -25,6 +25,10 @@ class Config:
     port: int = 5057
     eval_timeout_seconds: float = 5.0
     max_result_rows: int = 10_000
+    # Upper bound on rules evaluated simultaneously inside one run.  1 restores
+    # the original strict serial behaviour; anything larger enables the bounded
+    # worker pool with queued overflow.
+    eval_max_workers: int = 4
     abs_tolerance: float = 1e-6
     rel_tolerance: float = 0.0
     testing: bool = False
@@ -46,6 +50,7 @@ class Config:
             sql_roots=(fixtures / "impls",),
             host=host,
             port=int(os.environ.get("CALIBER_PORT", "5057")),
+            eval_max_workers=int(os.environ.get("CALIBER_MAX_WORKERS", "4")),
         )
 
     def ensure_dirs(self) -> None:
