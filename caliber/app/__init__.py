@@ -10,6 +10,7 @@ from .api.routes_datasets import bp as datasets_bp
 from .api.routes_metrics import bp as metrics_bp
 from .api.routes_reports import bp as reports_bp
 from .api.routes_runs import bp as runs_bp
+from .api.routes_snapshots import bp as snapshots_bp
 from .audit import record_error
 from .config import Config
 from .core import versioning
@@ -29,7 +30,7 @@ def create_app(config: Config | None = None) -> Flask:
     app = Flask(__name__)
     app.config["CALIBER"] = cfg
     app.json.ensure_ascii = False
-    for blueprint in (metrics_bp, runs_bp, datasets_bp, reports_bp):
+    for blueprint in (metrics_bp, runs_bp, datasets_bp, reports_bp, snapshots_bp):
         app.register_blueprint(blueprint)
 
     def get_db() -> sqlite3.Connection:
@@ -71,16 +72,21 @@ def create_app(config: Config | None = None) -> Flask:
     @app.get("/metrics")
     def metrics_page():
         items = versioning.list_metrics(g.db)
-        return render_template("metrics.html", metrics=items, metric=None, versions=[], snapshots=[])
+        return render_template(
+            "metrics.html", metrics=items, metric=None, versions=[],
+            snapshots=[], rollbacks=[],
+        )
 
     @app.get("/metrics/<key>")
     def metric_detail(key: str):
         latest = versioning.get_latest(g.db, key)
         versions = versioning.list_versions(g.db, key)
         snapshots = list_snapshots(g.db, key, 10)
+        rollbacks = versioning.list_rollbacks(g.db, key)
         return render_template(
             "metrics.html", metrics=versioning.list_metrics(g.db),
             metric=latest, versions=versions, snapshots=snapshots,
+            rollbacks=rollbacks,
         )
 
     @app.get("/runs")

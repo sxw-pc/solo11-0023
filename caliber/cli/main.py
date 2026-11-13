@@ -10,10 +10,17 @@ from pathlib import Path
 from app import run_local
 from app.audit import log_audit, record_error
 from app.config import Config
+from app.core import versioning
 from app.core.dataset_loader import load_catalog
 from app.core.registry import MetricRegistry
 from app.core.reporter import build_report, export_report
-from app.core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
+from app.core.snapshot import (
+    get_run,
+    list_runs,
+    perform_run,
+    snapshots_for_run,
+    trace_snapshot,
+)
 from app.db import init_db
 from app.errors import CaliberError
 
@@ -46,6 +53,21 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--format", choices=("json", "md", "html"), default="md")
     report.add_argument("--output", type=Path, help="输出文件；省略则打印到标准输出")
     report.set_defaults(handler=_report)
+
+    rollback = sub.add_parser("rollback", help="把指标回退到指定历史版本（追加式，生成新版本号）")
+    rollback.add_argument("--metric", required=True, help="指标 key")
+    rollback.add_argument("--to-version", type=int, required=True, help="目标历史版本号")
+    rollback.add_argument("--reason", default="", help="回退原因（写入审计）")
+    rollback.set_defaults(handler=_rollback)
+
+    undo = sub.add_parser("rollback-undo", help="撤销指标最近一次未撤销的回退")
+    undo.add_argument("--metric", required=True, help="指标 key")
+    undo.add_argument("--reason", default="", help="撤销原因（写入审计）")
+    undo.set_defaults(handler=_rollback_undo)
+
+    trace = sub.add_parser("trace", help="追溯某条快照当时实际执行的定义与 SQL")
+    trace.add_argument("--snapshot-id", type=int, required=True, help="快照 ID")
+    trace.set_defaults(handler=_trace)
     return parser
 
 
@@ -133,6 +155,42 @@ def _report(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) 
         sys.stdout.write(content)
         if not content.endswith("\n"):
             sys.stdout.write("\n")
+    return 0
+
+
+def _rollback(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
+    result = versioning.rollback_to_version(
+        conn, args.metric, args.to_version, args.reason
+    )
+    event = result["event"]
+    metric = result["metric"]
+    print(
+        f"已回退 {args.metric}: v{event['from_version']} → v{event['to_version']}"
+        f"（生成新版本 v{event['new_version']}，当前定义与 v{event['to_version']} 一致）"
+    )
+    print(f"当前版本: v{metric['version']}（{metric['name']}）")
+    print(f"撤销方式: python -m app rollback-undo --metric {args.metric}")
+    return 0
+
+
+def _rollback_undo(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
+    result = versioning.undo_rollback(conn, args.metric, args.reason)
+    event = result["event"]
+    metric = result["metric"]
+    print(
+        f"已撤销回退 {args.metric}: 恢复到 v{event['to_version']} 的定义"
+        f"（生成新版本 v{event['new_version']}）"
+    )
+    print(f"当前版本: v{metric['version']}（{metric['name']}）")
+    return 0
+
+
+def _trace(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
+    trace = trace_snapshot(conn, args.snapshot_id)
+    print(json.dumps(trace, ensure_ascii=False, indent=2, sort_keys=True))
+    if trace["degraded"]:
+        for notice in trace["notices"]:
+            print(f"提示: {notice}", file=sys.stderr)
     return 0
 
 

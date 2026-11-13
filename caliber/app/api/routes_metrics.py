@@ -1,9 +1,12 @@
-"""Read-only metric repository API."""
+"""Metric repository API: read-only queries plus audited rollback."""
 from __future__ import annotations
+
+from typing import Any
 
 from flask import Blueprint, g, jsonify, request
 
 from ..core import versioning
+from ..errors import CaliberError
 
 bp = Blueprint("api_metrics", __name__, url_prefix="/api/metrics")
 
@@ -17,7 +20,8 @@ def list_metrics():
 @bp.get("/<key>")
 def get_metric(key: str):
     latest = versioning.get_latest(g.db, key)
-    return jsonify({"metric": latest})
+    active = versioning.latest_active_rollback(g.db, key)
+    return jsonify({"metric": latest, "active_rollback": active})
 
 
 @bp.get("/<key>/versions")
@@ -44,3 +48,42 @@ def diff_metric(key: str):
         to_version = int(versioning.get_latest(g.db, key)["version"])
     result = versioning.diff_versions(g.db, key, from_version, to_version)
     return jsonify({"diff": result})
+
+
+def _rollback_payload() -> dict[str, Any]:
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise CaliberError("请求体必须是 JSON 对象")
+    return payload
+
+
+@bp.post("/<key>/rollback")
+def rollback_metric(key: str):
+    payload = _rollback_payload()
+    raw_version = payload.get("version")
+    if raw_version is None:
+        raise CaliberError("缺少必填字段 version（目标历史版本号）")
+    try:
+        target = int(raw_version)
+    except (TypeError, ValueError) as exc:
+        raise CaliberError("version 必须是整数") from exc
+    reason = str(payload.get("reason") or "")
+    result = versioning.rollback_to_version(g.db, key, target, reason)
+    return jsonify(result), 200
+
+
+@bp.post("/<key>/rollback/undo")
+def undo_metric_rollback(key: str):
+    payload = _rollback_payload()
+    reason = str(payload.get("reason") or "")
+    result = versioning.undo_rollback(g.db, key, reason)
+    return jsonify(result), 200
+
+
+@bp.get("/<key>/rollbacks")
+def list_metric_rollbacks(key: str):
+    versioning.get_latest(g.db, key)
+    items = versioning.list_rollbacks(g.db, key)
+    return jsonify({"key": key, "rollbacks": items, "count": len(items)})

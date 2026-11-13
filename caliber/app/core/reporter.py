@@ -9,7 +9,13 @@ from typing import Any
 from ..audit import list_audit
 from ..errors import ReportError
 from ..models import utc_now
-from .snapshot import detect_drift, get_run, snapshots_for_run
+from .snapshot import (
+    detect_drift,
+    get_run,
+    resolve_snapshot_trace,
+    snapshots_for_run,
+    trace_summary,
+)
 
 FORMATS = ("json", "md", "html")
 
@@ -20,12 +26,15 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     metrics: list[dict[str, Any]] = []
     counts = {"consistent": 0, "inconsistent": 0, "partial": 0}
     keys: set[str] = set()
+    degraded_count = 0
     for snapshot in snapshots:
         result = snapshot["result"]
         definition = result.get("metric", {})
         key = snapshot["metric_key"]
         keys.add(key)
         counts[snapshot["verdict"]] = counts.get(snapshot["verdict"], 0) + 1
+        trace = trace_summary(resolve_snapshot_trace(conn, snapshot))
+        degraded_count += 1 if trace["degraded"] else 0
         metrics.append(
             {
                 "key": key,
@@ -47,6 +56,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
                     "rel": result.get("rel_tolerance"),
                 },
                 "snapshot_id": snapshot["id"],
+                "trace": trace,
             }
         )
     drift_events: list[dict[str, Any]] = []
@@ -60,6 +70,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
             "metric_count": len(metrics),
             **counts,
             "drift_count": len(drift_events),
+            "degraded_snapshot_count": degraded_count,
         },
         "metrics": metrics,
         "drift_events": drift_events,
@@ -99,9 +110,19 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| {summary['metric_count']} | {summary['consistent']} | "
         f"{summary['inconsistent']} | {summary['partial']} | {summary['drift_count']} |",
         "",
+    ]
+    if summary.get("degraded_snapshot_count"):
+        lines.extend(
+            [
+                f"> ⚠ {summary['degraded_snapshot_count']} 个快照为旧格式，"
+                "定义内容按版本号降级读取，详见各指标的「定义追溯」提示。",
+                "",
+            ]
+        )
+    lines.extend([
         "## 指标明细",
         "",
-    ]
+    ])
     for item in report["metrics"]:
         lines.extend(
             [
@@ -112,6 +133,13 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"- 单位 / 粒度：{item['unit']} / {item['grain']}",
                 f"- 数据集：{', '.join(item['datasets'])}",
                 f"- 维度数：{item['summary'].get('dimension_count', 0)}",
+            ]
+        )
+        trace = item.get("trace") or {}
+        if trace.get("degraded"):
+            lines.append(f"- 定义追溯：⚠ {'；'.join(trace.get('notices') or [])}")
+        lines.extend(
+            [
                 "",
                 "| 实现 | 数据集 | 行数 | 耗时(ms) |",
                 "| --- | --- | --- | --- |",
@@ -188,6 +216,12 @@ def render_html(report: dict[str, Any]) -> str:
             f"{html.escape(item['unit'])} · 粒度 {html.escape(item['grain'])} · 数据集 "
             f"{html.escape(', '.join(item['datasets']))}</p>"
         )
+        trace = item.get("trace") or {}
+        if trace.get("degraded"):
+            notice = "；".join(trace.get("notices") or [])
+            parts.append(
+                f"<p class=\"meta\">定义追溯：⚠ {html.escape(notice)}</p>"
+            )
         parts.append("<table><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th></tr>")
         for impl in item["implementations"]:
             parts.append(

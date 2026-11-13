@@ -63,11 +63,34 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail_json TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS metric_rollbacks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_key TEXT NOT NULL REFERENCES metrics(key) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'rollback',
+    from_version INTEGER NOT NULL,
+    to_version INTEGER NOT NULL,
+    new_version INTEGER NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    undone_at TEXT,
+    undone_by INTEGER,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_versions_key ON metric_versions(metric_key, version DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_key ON snapshots(metric_key, id DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_run ON snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rollbacks_key ON metric_rollbacks(metric_key, id DESC);
 """
+
+# Columns added after the initial schema.  init_db applies them idempotently
+# so existing repositories keep working without a manual migration step.
+SNAPSHOT_EXTRA_COLUMNS = {
+    "definition_json": "ALTER TABLE snapshots ADD COLUMN definition_json TEXT",
+    "definition_hash": "ALTER TABLE snapshots ADD COLUMN definition_hash TEXT",
+    "sql_snapshot_json": "ALTER TABLE snapshots ADD COLUMN sql_snapshot_json TEXT",
+    "exec_meta_json": "ALTER TABLE snapshots ADD COLUMN exec_meta_json TEXT",
+}
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -84,12 +107,24 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 def init_db(db_path: str | Path) -> sqlite3.Connection:
     conn = connect(db_path)
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
     return conn
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add post-initial-schema columns to existing databases, idempotently."""
+    existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(snapshots)")
+    }
+    for column, ddl in SNAPSHOT_EXTRA_COLUMNS.items():
+        if column not in existing:
+            conn.execute(ddl)
+
+
 def table_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    tables = ("metrics", "metric_versions", "runs", "snapshots", "audit_log")
+    tables = ("metrics", "metric_versions", "runs", "snapshots", "audit_log",
+              "metric_rollbacks")
     return {name: int(conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0])
             for name in tables}
 

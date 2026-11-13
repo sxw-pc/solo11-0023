@@ -10,6 +10,8 @@
 
 - 指标定义 DSL（YAML）与结构化校验。
 - 指标仓库：SQLite 存储、自增版本、历史读取、字段级版本差异。
+- 版本回退与撤销：追加式回退（生成新版本号），单事务提交，全程审计。
+- 快照追溯：每次运行固化当时实际执行的定义与 SQL 文本；旧格式快照按版本号降级读取并给出显式提示。
 - 离线数据源：目录内 CSV 加载到内存 SQLite，支持编码、表头规范化与类型推断。
 - 多实现比对：维度对齐、缺失维度识别、绝对/相对容差判定。
 - 口径快照、`consistent → inconsistent` 漂移检测、审计日志。
@@ -46,6 +48,12 @@ python -m app report --last --format md
 
 # 4) 启动本地页面（仅 127.0.0.1:5057）
 python -m app serve
+
+# 5) 版本回退与追溯（可选）
+python -m app rollback --metric active_users --to-version 1 --reason "回到旧口径"
+python -m app run --metrics active_users --datasets fixtures/datasets  # 用回退后定义执行
+python -m app rollback-undo --metric active_users                      # 撤销回退，定义恢复
+python -m app trace --snapshot-id 1                                    # 追溯快照当时执行的定义与 SQL
 ```
 
 浏览器访问 <http://127.0.0.1:5057/>。页面展示指标列表、指标详情与版本历史、运行页和报告页。
@@ -127,7 +135,17 @@ SQL 约定：
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
 
-## 5. 目录结构
+## 5. 版本回退与快照追溯
+
+**回退是追加式的。** `rollback` 不会改写任何历史版本行：它把目标历史版本的定义复制为一个**新版本号**并移动 `current_version` 指针，因此一个版本号永远只对应一份定义内容。回退后新发起的运行自动使用回退后的定义；历史 run 的快照与报告不受影响。整个回退（新版本行 + 指针 + 回退事件 + 审计记录）在单个事务内提交，中途失败不会留下写坏一半的定义表。
+
+**撤销回退同样是追加式的。** `rollback-undo` 找到最近一次未撤销的回退事件，再发起一次回到「回退前版本」的回退（生成新版本号），并把原事件标记为已撤销。历史永远只增不改，审计链完整。
+
+**快照追溯选择方案 A：每次运行固化定义快照。** 每条快照自带当时实际执行的指标定义全文、每个实现的 SQL 文本与内容哈希，以及记录该策略选择与理由的执行元信息（`exec_meta`）。理由：SQL 文件放在磁盘上、不在版本表里，只有固化内容才能在文件被覆写后仍然复现当时结论；代价是每个快照重复存储定义与 SQL（体量小、离线运行频率低），并需要为旧快照提供降级路径。未选方案 B（不可变版本标识）：数字版本与内容解耦虽省去重复存储，但追溯仍需回查 `metric_versions`，且无法覆盖磁盘 SQL 文件被覆写的情形。
+
+**旧快照降级读取。** 迁移前创建的快照只有版本号、没有固化内容：追溯与报告会降级为按版本号读 `metric_versions` 并给出显式提示（定义可能受后续回退/重导影响、SQL 文本未固化），不会报错中断报告链。回退的追加式实现保证版本号永不重新指向不同内容，因此降级读取的定义内容本身仍然是可靠的。
+
+## 6. 目录结构
 
 ```text
 caliber/
@@ -142,11 +160,11 @@ caliber/
 │   ├── models.py            # 数据类型
 │   ├── errors.py            # 领域异常
 │   ├── audit.py             # 审计日志
-│   ├── api/                 # 指标、运行、数据集、报告 API
+│   ├── api/                 # 指标、运行、数据集、报告、快照追溯 API
 │   ├── core/                # DSL、校验、仓库、求值、比对、快照、报告
 │   ├── templates/           # 本地 Jinja 页面
 │   └── static/              # 原生 CSS/JS，无外部依赖
-├── cli/main.py              # serve / import-metrics / run / report
+├── cli/main.py              # serve / import-metrics / run / report / rollback / rollback-undo / trace
 ├── fixtures/
 │   ├── datasets/            # 合成 CSV
 │   ├── metrics/             # 合成 YAML 指标
@@ -154,7 +172,7 @@ caliber/
 └── tests/                   # pytest 全链路测试
 ```
 
-## 6. 主要 HTTP 接口
+## 7. 主要 HTTP 接口
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -163,6 +181,11 @@ caliber/
 | GET | `/api/metrics/<key>/versions` | 全部历史版本 |
 | GET | `/api/metrics/<key>/versions/<n>` | 指定版本 |
 | GET | `/api/metrics/<key>/diff?from=1&to=2` | 版本字段差异 |
+| POST | `/api/metrics/<key>/rollback` | 回退到指定历史版本（追加式，写审计） |
+| POST | `/api/metrics/<key>/rollback/undo` | 撤销最近一次未撤销的回退 |
+| GET | `/api/metrics/<key>/rollbacks` | 回退事件列表 |
+| GET | `/api/snapshots/<id>` | 单条快照（含固化定义与 SQL） |
+| GET | `/api/snapshots/<id>/trace` | 快照追溯：当时执行的定义/SQL，旧格式自动降级并提示 |
 | GET | `/api/datasets` | 数据集元信息 |
 | GET | `/api/datasets/<key>/preview` | 数据预览 |
 | POST | `/api/runs` | 触发同步比对 |
@@ -179,16 +202,16 @@ caliber/
 }
 ```
 
-## 7. 安全与合规
+## 8. 安全与合规
 
 - **只读 SQL**：语句白名单只允许 `SELECT` / `WITH`；显式拒绝写入、DDL、ATTACH、PRAGMA、事务控制等关键字，并拒绝多语句。求值连接设置 `PRAGMA query_only = ON`，每次查询在事务中执行后回滚。违规语句抛出 `unsafe_sql`，测试覆盖写操作和 ATTACH。
 - **路径白名单**：`sql_file` 只能相对受信任 SQL 目录解析。绝对路径、`..`、锚点路径以及逃逸出根目录的解析结果均被拒绝。
 - **仅本机**：默认且只允许监听 `127.0.0.1`（或同义回环地址）；无鉴权，因为定位是单机工作台。
 - **完全离线**：运行期不发起网络请求。模板不引用 CDN、远程字体、遥测或外部 API。
-- **审计**：导入、运行、失败与报告导出写入本地 `audit_log`；异常由 CLI/HTTP 边界统一捕获，不静默失败。
+- **审计**：导入、回退、撤销回退、运行、失败与报告导出写入本地 `audit_log`；回退的审计记录与定义变更同事务提交；异常由 CLI/HTTP 边界统一捕获，不静默失败。
 - **无真实敏感信息**：仓库没有真实密钥、令牌、公司名、真实域名或真实 IP。
 
-## 8. 数据与 fixture 声明
+## 9. 数据与 fixture 声明
 
 `fixtures/` 中全部 CSV、YAML、SQL 均为本项目的**合成数据**，不对应任何真实用户、订单、组织或业务系统。用户 ID、订单 ID、渠道名、金额和时间均为手工构造；仅用于演示一致与不一致两类场景：
 
@@ -198,7 +221,7 @@ caliber/
 
 任何示例使用的域名仅限 `example.invalid`、`localhost` 或 `127.0.0.1`；本项目实际上不做 DNS 或 HTTP 出站访问。
 
-## 9. 已知限制与后续方向
+## 10. 已知限制与后续方向
 
 当前限制：
 

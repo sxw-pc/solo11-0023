@@ -115,10 +115,14 @@ def test_run_metric_on_fixtures(
     catalog: DatasetCatalog, fixture_tree: Path, sql_roots: tuple[Path, ...]
 ):
     metric = parse_metric_file(fixture_tree / "metrics" / "active_users.yaml")
-    evaluations = evaluate_metric_impls(metric, 1, catalog, sql_roots)
+    evaluations, sql_records = evaluate_metric_impls(metric, 1, catalog, sql_roots)
     assert set(evaluations) == {"impl_a", "impl_b"}
     assert evaluations["impl_a"].values == evaluations["impl_b"].values
     assert evaluations["impl_a"].duration_ms >= 0
-    comparison, _ = run_metric(metric, 1, catalog, sql_roots)
+    assert set(sql_records) == {"impl_a", "impl_b"}
+    assert "select" in sql_records["impl_a"]["content"].lower()
+    assert len(sql_records["impl_a"]["sha256"]) == 64
+    comparison, _, again = run_metric(metric, 1, catalog, sql_roots)
     assert comparison.verdict == "consistent"
+    assert again == sql_records
 

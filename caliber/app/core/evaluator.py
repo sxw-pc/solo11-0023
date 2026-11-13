@@ -1,6 +1,7 @@
 """Read-only SQL evaluation for metric implementations."""
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 import time
@@ -191,8 +192,15 @@ def evaluate_metric_impls(
     *,
     timeout_seconds: float = 5.0,
     max_rows: int = 10_000,
-) -> dict[str, ImplEvaluation]:
+) -> tuple[dict[str, ImplEvaluation], dict[str, dict[str, str]]]:
+    """Evaluate all impls and also return the exact SQL text that was read.
+
+    The second return value maps impl_id to
+    ``{"sql_file", "sha256", "content"}`` so callers can freeze precisely
+    what was executed into a snapshot, immune to later file edits.
+    """
     results: dict[str, ImplEvaluation] = {}
+    sql_records: dict[str, dict[str, str]] = {}
     conn = catalog.readonly_connection()
     for impl in metric.impls:
         catalog.require(impl.source)
@@ -201,6 +209,11 @@ def evaluate_metric_impls(
             sql = sql_path.read_text(encoding="utf-8-sig")
         except OSError as exc:
             raise EvaluationError(f"无法读取 SQL 文件: {sql_path}: {exc}") from exc
+        sql_records[impl.id] = {
+            "sql_file": impl.sql_file,
+            "sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+            "content": sql,
+        }
         values, row_count, duration = evaluate_sql(
             conn,
             sql,
@@ -217,7 +230,7 @@ def evaluate_metric_impls(
             row_count=row_count,
             duration_ms=round(duration, 3),
         )
-    return results
+    return results, sql_records
 
 
 def run_metric(
@@ -230,8 +243,8 @@ def run_metric(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
-) -> tuple[ComparisonResult, dict[str, ImplEvaluation]]:
-    evaluations = evaluate_metric_impls(
+) -> tuple[ComparisonResult, dict[str, ImplEvaluation], dict[str, dict[str, str]]]:
+    evaluations, sql_records = evaluate_metric_impls(
         metric,
         version,
         catalog,
@@ -246,4 +259,4 @@ def run_metric(
         abs_tolerance=abs_tolerance,
         rel_tolerance=rel_tolerance,
     )
-    return comparison, evaluations
+    return comparison, evaluations, sql_records

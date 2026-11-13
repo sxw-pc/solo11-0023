@@ -12,6 +12,26 @@ def _encode(detail: Any) -> str:
     return json.dumps(detail or {}, ensure_ascii=False, default=str)
 
 
+def insert_audit_row(
+    conn: sqlite3.Connection,
+    action: str,
+    entity: str,
+    status: str = "ok",
+    detail: dict[str, Any] | None = None,
+) -> int:
+    """Insert one audit row WITHOUT committing.
+
+    Intended for callers that manage their own transaction (e.g. rollback),
+    so the audit record commits or rolls back together with the mutation.
+    """
+    cursor = conn.execute(
+        "INSERT INTO audit_log(created_at, action, entity, status, detail_json) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (utc_now(), action, entity, status, _encode(detail)),
+    )
+    return int(cursor.lastrowid or 0)
+
+
 def log_audit(
     conn: sqlite3.Connection,
     action: str,
@@ -19,13 +39,9 @@ def log_audit(
     status: str = "ok",
     detail: dict[str, Any] | None = None,
 ) -> int:
-    cursor = conn.execute(
-        "INSERT INTO audit_log(created_at, action, entity, status, detail_json) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (utc_now(), action, entity, status, _encode(detail)),
-    )
+    row_id = insert_audit_row(conn, action, entity, status, detail)
     conn.commit()
-    return int(cursor.lastrowid or 0)
+    return row_id
 
 
 def record_error(

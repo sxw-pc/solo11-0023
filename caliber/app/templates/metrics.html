@@ -49,7 +49,7 @@
         <tbody>
         {% for version in versions %}
           <tr>
-            <td><strong>v{{ version.version }}</strong>{% if version.version == metric.version %} <span class="pill consistent">latest</span>{% endif %}</td>
+            <td><strong>v{{ version.version }}</strong>{% if version.version == metric.version %} <span class="pill consistent">latest</span>{% endif %}{% if version.origin == 'rollback' %} <span class="pill partial">回退</span>{% elif version.origin == 'undo' %} <span class="pill partial">撤销</span>{% endif %}</td>
             <td class="mono">{{ version.source_file.split('/')[-1].split('\\')[-1] }}</td>
             <td class="muted">{{ version.created_at }}</td>
           </tr>
@@ -59,6 +59,30 @@
       <p class="hint">版本差异可通过 API 查看：<code>/api/metrics/{{ metric.key }}/diff?from=1&amp;to={{ metric.version }}</code></p>
     </div>
   </section>
+
+  {% if rollbacks %}
+  <section class="panel">
+    <div class="panel-head"><h2>回退记录</h2><span class="muted">{{ rollbacks | length }} 条</span></div>
+    <table>
+      <thead><tr><th>事件</th><th>类型</th><th>回退前</th><th>目标版本</th><th>生成版本</th><th>状态</th><th>原因</th><th>时间</th></tr></thead>
+      <tbody>
+      {% for event in rollbacks %}
+        <tr>
+          <td>#{{ event.id }}</td>
+          <td>{{ '撤销回退' if event.kind == 'undo' else '回退' }}</td>
+          <td>v{{ event.from_version }}</td>
+          <td>v{{ event.to_version }}</td>
+          <td>v{{ event.new_version }}</td>
+          <td>{% if event.undone_at %}<span class="muted">已被 #{{ event.undone_by }} 撤销</span>{% else %}生效中{% endif %}</td>
+          <td class="muted">{{ event.reason or '—' }}</td>
+          <td class="muted">{{ event.created_at }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="hint">回退为追加式：生成新版本号，历史版本与快照不受影响。API：<code>POST /api/metrics/{{ metric.key }}/rollback</code> 与 <code>/rollback/undo</code>。</p>
+  </section>
+  {% endif %}
 
   <section class="panel">
     <div class="panel-head"><h2>最近口径快照</h2><a href="/runs">运行比对 →</a></div>
@@ -74,7 +98,7 @@
           <td><span class="pill {{ snap.verdict }}">{{ snap.verdict }}</span></td>
           <td>{{ snap.summary.diff_count }} 个维度</td>
           <td class="muted">{{ snap.created_at }}</td>
-          <td><a class="quiet" href="/reports/{{ snap.run_id }}">报告</a></td>
+          <td><a class="quiet" href="/reports/{{ snap.run_id }}">报告</a> <a class="quiet" href="/api/snapshots/{{ snap.id }}/trace">追溯</a></td>
         </tr>
       {% endfor %}
       </tbody>
