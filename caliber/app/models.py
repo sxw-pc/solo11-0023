@@ -122,6 +122,31 @@ class DimensionDiff:
 
 
 @dataclass(slots=True)
+class FailureRecord:
+    """One row-level failure inside an execution result.
+
+    The record is stored inside the existing snapshot ``result_json`` (no new
+    storage) and is the unit the drill-down aggregation consumes.  ``batch``
+    is the run id that produced the failure; ``samples`` carries the raw
+    per-implementation values so downstream attribution never needs the
+    original datasets.
+    """
+
+    rule: str
+    rule_version: int
+    field: str
+    rule_type: str
+    dimension: str
+    datasets: list[str]
+    samples: list[dict[str, Any]]
+    max_delta: float | None
+    batch: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class ComparisonResult:
     metric_key: str
     metric_version: int

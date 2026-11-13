@@ -11,6 +11,7 @@ from app import run_local
 from app.audit import log_audit, record_error
 from app.config import Config
 from app.core.dataset_loader import load_catalog
+from app.core.drilldown import build_drilldown, build_drilldown_from_file, export_drilldown
 from app.core.registry import MetricRegistry
 from app.core.reporter import build_report, export_report
 from app.core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
@@ -46,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--format", choices=("json", "md", "html"), default="md")
     report.add_argument("--output", type=Path, help="输出文件；省略则打印到标准输出")
     report.set_defaults(handler=_report)
+
+    drill = sub.add_parser("drilldown", help="多维下钻与失败归因（聚合执行结果产物）")
+    drill.add_argument("--run-id", type=int, help="只分析指定运行；省略表示仓库全部运行")
+    drill.add_argument("--last", action="store_true", help="只分析最近一次运行")
+    drill.add_argument("--file", type=Path, help="分析导出的结果文件（报告 JSON / 结果 JSON / JSONL）")
+    drill.add_argument("--format", choices=("json", "md"), default="json", help="输出格式")
+    drill.add_argument("--chunk-size", type=int, default=500, help="分块读取快照的块大小")
+    drill.add_argument("--max-representatives", type=int, default=5, help="每个问题簇保留的代表性失败值数量")
+    drill.add_argument("--output", type=Path, help="输出文件；省略则打印到标准输出")
+    drill.set_defaults(handler=_drilldown)
     return parser
 
 
@@ -133,6 +144,41 @@ def _report(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) 
         sys.stdout.write(content)
         if not content.endswith("\n"):
             sys.stdout.write("\n")
+    return 0
+
+
+def _drilldown(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
+    if args.file:
+        target = args.file.expanduser().resolve()
+        report = build_drilldown_from_file(target, max_representatives=args.max_representatives)
+        scope = f"file:{target}"
+    else:
+        run_id = args.run_id
+        if args.last:
+            runs = list_runs(conn, 1)
+            if not runs:
+                raise CaliberError("还没有可分析的运行记录")
+            run_id = int(runs[0]["id"])
+        report = build_drilldown(
+            conn,
+            run_id=run_id,
+            chunk_size=args.chunk_size,
+            max_representatives=args.max_representatives,
+        )
+        scope = f"run:{run_id}" if run_id is not None else "run:all"
+    fmt, content = export_drilldown(report, args.format)
+    log_audit(conn, "drilldown.export", scope, "ok", {"format": fmt, "via": "cli"})
+    if args.output:
+        output = args.output.expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(content, encoding="utf-8")
+        print(f"下钻报告已写入 {output}")
+    else:
+        sys.stdout.write(content)
+        if not content.endswith("\n"):
+            sys.stdout.write("\n")
+    for notice in report["notices"]:
+        print(f"提示: {notice}", file=sys.stderr)
     return 0
 
 

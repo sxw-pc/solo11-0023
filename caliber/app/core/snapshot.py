@@ -9,6 +9,7 @@ from typing import Any
 from ..audit import log_audit, record_error
 from ..errors import CaliberError, NotFoundError, RunError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition, utc_now
+from .drilldown import build_failures
 from .evaluator import run_metric
 from .versioning import get_latest, list_metrics
 
@@ -51,6 +52,9 @@ def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinitio
     result = comparison.to_dict()
     result["metric"] = metric.to_dict()
     result["implementations"] = [item.to_dict() for item in evaluations.values()]
+    # 失败样例明细（schema 2）：与既有结果同存于 result_json，不另起存储。
+    # 老版本产物没有该键，下钻聚合会自动降级为按规则维度汇总。
+    result["failures"] = build_failures(comparison, metric, evaluations, batch=run_id)
     datasets = sorted({item.source for item in evaluations.values()})
     cursor = conn.execute(
         """

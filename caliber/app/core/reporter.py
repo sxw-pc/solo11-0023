@@ -41,6 +41,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
                 "summary": snapshot["summary"],
                 "dimensions": result.get("dimensions", []),
                 "diffs": result.get("diffs", []),
+                "failures": result.get("failures"),
                 "implementations": result.get("implementations", []),
                 "tolerances": {
                     "abs": result.get("abs_tolerance"),

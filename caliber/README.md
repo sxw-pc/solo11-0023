@@ -12,6 +12,7 @@
 - 指标仓库：SQLite 存储、自增版本、历史读取、字段级版本差异。
 - 离线数据源：目录内 CSV 加载到内存 SQLite，支持编码、表头规范化与类型推断。
 - 多实现比对：维度对齐、缺失维度识别、绝对/相对容差判定。
+- 多维下钻与失败归因：按数据集、字段、规则类型、失败样例值聚合，失败记录确定性聚簇，老版本结果自动降级。
 - 口径快照、`consistent → inconsistent` 漂移检测、审计日志。
 - 本地 Flask 页面、HTTP API、命令行入口与三种报告格式。
 
@@ -44,7 +45,10 @@ python -m app run --metrics active_users,conversion_rate,avg_order_value \
 # 3) 导出最近一次运行的 Markdown 报告
 python -m app report --last --format md
 
-# 4) 启动本地页面（仅 127.0.0.1:5057）
+# 4) 对执行结果做多维下钻与失败归因（跨运行聚簇）
+python -m app drilldown --format json
+
+# 5) 启动本地页面（仅 127.0.0.1:5057）
 python -m app serve
 ```
 
@@ -127,7 +131,53 @@ SQL 约定：
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
 
-## 5. 目录结构
+## 5. 多维下钻与失败归因
+
+比对执行结束后，`drilldown` 在既有执行结果产物（快照 `result_json` 或导出的报告 JSON）上做二次聚合，回答「为什么挂、影响谁」。不引入新的存储：失败明细作为 `failures` 字段直接写入执行结果（结果 schema 2），与既有结构共存；下钻报告即算即得，不落库。
+
+概念映射（指标一致性语境）：
+
+| 下钻概念 | 对应结构 |
+| --- | --- |
+| 规则 / 字段 | 指标一致性校验（`metric_key` @ version，即被校验的度量字段） |
+| 规则类型 | `value_mismatch`（一致性）/ `missing_dimension`（完整性） |
+| 数据集 | 失败维度涉及的实现来源（impl source） |
+| 失败样例值 | 各实现在失败维度上的原始返回值（缺失为 `null`） |
+| 批次号 | 产生失败的运行 ID（`run_id`） |
+| 影响行数占比 | 失败维度数 / 已校验维度总数 |
+
+```bash
+# 聚合仓库中全部运行的结果（跨批次归因，默认）
+python -m app drilldown --format json
+
+# 只看最近一次运行；或直接分析导出的结果文件（报告 JSON / 单结果 JSON / JSONL）
+python -m app drilldown --last --format md
+python -m app drilldown --file report.json
+
+# 大结果集：调整分块大小；限制每个簇保留的代表值数量
+python -m app drilldown --chunk-size 100 --max-representatives 3
+```
+
+输出内容：
+
+- **多维聚合**：按数据集、字段、规则类型、失败样例值四个维度统计失败数、影响行数占比与首次/最近批次。
+- **问题簇**：失败记录按（规则类型 × 数据集组合 × 差异量级）签名聚成若干簇。每个簇给出影响行数占比、首次出现的批次号、涉及字段、归因提示（如「疑似整批采集异常」「疑似字段级脏数据」）以及一组代表性失败值。代表值逐条取自原始失败明细，可回溯到具体规则、维度与批次，不做插值或合成。
+- **确定性**：同一输入的簇划分与代表值选取完全可复现；所有排序显式固定，不依赖随机数、字典序或时钟。
+
+大结果集与内存：
+
+- 仓库路径按快照 keyset 分块流式读取（`--chunk-size`），聚合状态只与聚合键数量成正比，不会把全部失败明细一次性读进内存。
+- 失败样例值计数有上限（10,000），溢出计入 `__other__` 桶并在 `notices` 中提示。
+- 超大结果集可整理为 JSONL（每行一个失败记录）后用 `--file` 逐行流式分析；JSONL 不含校验总量信息，影响占比输出为 `null` 并附提示。
+
+向后兼容（降级路径）：
+
+- 老版本产出的结果（快照或导出文件中缺少 `failures` 字段）不会报错，自动降级为只按规则维度汇总：输出 `mode: "legacy"`（全部老产物）或 `"partial"`（新旧混合），并在 `notices` 中给出明确提示；CLI 同时把提示写到标准错误。
+- 重新执行比对后，新结果自动携带失败样例字段，恢复完整下钻能力。
+
+HTTP 接口：`GET /api/drilldown/?run_id=<id>&format=json|md`；省略 `run_id` 时聚合仓库全部运行。
+
+## 6. 目录结构
 
 ```text
 caliber/
@@ -142,11 +192,11 @@ caliber/
 │   ├── models.py            # 数据类型
 │   ├── errors.py            # 领域异常
 │   ├── audit.py             # 审计日志
-│   ├── api/                 # 指标、运行、数据集、报告 API
-│   ├── core/                # DSL、校验、仓库、求值、比对、快照、报告
+│   ├── api/                 # 指标、运行、数据集、报告、下钻 API
+│   ├── core/                # DSL、校验、仓库、求值、比对、快照、报告、下钻归因
 │   ├── templates/           # 本地 Jinja 页面
 │   └── static/              # 原生 CSS/JS，无外部依赖
-├── cli/main.py              # serve / import-metrics / run / report
+├── cli/main.py              # serve / import-metrics / run / report / drilldown
 ├── fixtures/
 │   ├── datasets/            # 合成 CSV
 │   ├── metrics/             # 合成 YAML 指标
@@ -154,7 +204,7 @@ caliber/
 └── tests/                   # pytest 全链路测试
 ```
 
-## 6. 主要 HTTP 接口
+## 7. 主要 HTTP 接口
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -168,6 +218,7 @@ caliber/
 | POST | `/api/runs` | 触发同步比对 |
 | GET | `/api/runs` / `/api/runs/<id>` | 运行历史与快照 |
 | GET | `/api/reports/<run_id>?format=json\|md\|html` | 报告导出 |
+| GET | `/api/drilldown?run_id=<id>&format=json\|md` | 多维下钻与失败归因（省略 `run_id` 聚合全部运行） |
 
 `POST /api/runs` 示例请求体：
 
@@ -179,7 +230,7 @@ caliber/
 }
 ```
 
-## 7. 安全与合规
+## 8. 安全与合规
 
 - **只读 SQL**：语句白名单只允许 `SELECT` / `WITH`；显式拒绝写入、DDL、ATTACH、PRAGMA、事务控制等关键字，并拒绝多语句。求值连接设置 `PRAGMA query_only = ON`，每次查询在事务中执行后回滚。违规语句抛出 `unsafe_sql`，测试覆盖写操作和 ATTACH。
 - **路径白名单**：`sql_file` 只能相对受信任 SQL 目录解析。绝对路径、`..`、锚点路径以及逃逸出根目录的解析结果均被拒绝。
@@ -188,7 +239,7 @@ caliber/
 - **审计**：导入、运行、失败与报告导出写入本地 `audit_log`；异常由 CLI/HTTP 边界统一捕获，不静默失败。
 - **无真实敏感信息**：仓库没有真实密钥、令牌、公司名、真实域名或真实 IP。
 
-## 8. 数据与 fixture 声明
+## 9. 数据与 fixture 声明
 
 `fixtures/` 中全部 CSV、YAML、SQL 均为本项目的**合成数据**，不对应任何真实用户、订单、组织或业务系统。用户 ID、订单 ID、渠道名、金额和时间均为手工构造；仅用于演示一致与不一致两类场景：
 
@@ -198,7 +249,7 @@ caliber/
 
 任何示例使用的域名仅限 `example.invalid`、`localhost` 或 `127.0.0.1`；本项目实际上不做 DNS 或 HTTP 出站访问。
 
-## 9. 已知限制与后续方向
+## 10. 已知限制与后续方向
 
 当前限制：
 

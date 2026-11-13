@@ -7,6 +7,7 @@ import sqlite3
 from flask import Flask, g, jsonify, render_template, request
 
 from .api.routes_datasets import bp as datasets_bp
+from .api.routes_drilldown import bp as drilldown_bp
 from .api.routes_metrics import bp as metrics_bp
 from .api.routes_reports import bp as reports_bp
 from .api.routes_runs import bp as runs_bp
@@ -29,7 +30,7 @@ def create_app(config: Config | None = None) -> Flask:
     app = Flask(__name__)
     app.config["CALIBER"] = cfg
     app.json.ensure_ascii = False
-    for blueprint in (metrics_bp, runs_bp, datasets_bp, reports_bp):
+    for blueprint in (metrics_bp, runs_bp, datasets_bp, reports_bp, drilldown_bp):
         app.register_blueprint(blueprint)
 
     def get_db() -> sqlite3.Connection:
