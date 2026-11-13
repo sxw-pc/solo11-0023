@@ -100,7 +100,14 @@ def create_app(config: Config | None = None) -> Flask:
 
     @app.get("/reports/<int:run_id>")
     def report_page(run_id: int):
-        return render_template("report.html", report=build_report(g.db, run_id))
+        report = build_report(
+            g.db,
+            run_id,
+            view=request.args.get("view", "all"),
+            top=request.args.get("top"),
+            dimension=request.args.get("dimension"),
+        )
+        return render_template("report.html", report=report)
 
     def wants_json() -> bool:
         return request.path.startswith("/api/") or request.args.get("format") == "json"

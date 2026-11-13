@@ -9,12 +9,21 @@ from typing import Any
 from ..audit import list_audit
 from ..errors import ReportError
 from ..models import utc_now
-from .snapshot import detect_drift, get_run, snapshots_for_run
+from .ranking import apply_view, normalize_view
+from .snapshot import detect_drift, ensure_dimension_ranking, get_run, snapshots_for_run
 
 FORMATS = ("json", "md", "html")
 
 
-def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
+def build_report(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    view: str = "all",
+    top: Any = None,
+    dimension: Any = None,
+) -> dict[str, Any]:
+    view_spec = normalize_view(view, top, dimension)
     run = get_run(conn, run_id)
     snapshots = snapshots_for_run(conn, run_id)
     metrics: list[dict[str, Any]] = []
@@ -22,10 +31,14 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     keys: set[str] = set()
     for snapshot in snapshots:
         result = snapshot["result"]
+        ranking = ensure_dimension_ranking(conn, snapshot)
         definition = result.get("metric", {})
         key = snapshot["metric_key"]
         keys.add(key)
         counts[snapshot["verdict"]] = counts.get(snapshot["verdict"], 0) + 1
+        raw_diffs = result.get("diffs")
+        diffs = raw_diffs if isinstance(raw_diffs, list) else []
+        selected, view_meta = apply_view(diffs, ranking, view_spec)
         metrics.append(
             {
                 "key": key,
@@ -40,7 +53,11 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
                 "impl_ids": snapshot["impl_ids"],
                 "summary": snapshot["summary"],
                 "dimensions": result.get("dimensions", []),
-                "diffs": result.get("diffs", []),
+                "diffs": selected,
+                "diffs_shown": view_meta["shown"],
+                "diffs_total": view_meta["total"],
+                "ranking_degraded": bool(ranking.get("degraded")),
+                "ranking_notice": ranking.get("notice"),
                 "implementations": result.get("implementations", []),
                 "tolerances": {
                     "abs": result.get("abs_tolerance"),
@@ -56,6 +73,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         "report_version": "1.0",
         "generated_at": utc_now(),
         "run": run,
+        "view": view_spec,
         "summary": {
             "metric_count": len(metrics),
             **counts,
@@ -82,6 +100,7 @@ def _cell(value: Any) -> str:
 def render_markdown(report: dict[str, Any]) -> str:
     run = report["run"]
     summary = report["summary"]
+    view = report.get("view", {})
     lines = [
         "# 指标准星一致性报告",
         "",
@@ -91,6 +110,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- 结束时间：{run.get('finished_at') or '-'}",
         f"- 数据集目录：`{run['datasets_dir']}`",
         f"- 容差：绝对 {run['tolerances'].get('abs')} / 相对 {run['tolerances'].get('rel')}",
+        f"- 维度视图：{view.get('label', '全部')}",
         "",
         "## 总览",
         "",
@@ -112,6 +132,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"- 单位 / 粒度：{item['unit']} / {item['grain']}",
                 f"- 数据集：{', '.join(item['datasets'])}",
                 f"- 维度数：{item['summary'].get('dimension_count', 0)}",
+                f"- 差异维度：显示 {item['diffs_shown']} / 共 {item['diffs_total']}",
                 "",
                 "| 实现 | 数据集 | 行数 | 耗时(ms) |",
                 "| --- | --- | --- | --- |",
@@ -123,6 +144,8 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"{impl['row_count']} | {impl['duration_ms']} |"
             )
         lines.append("")
+        if item["ranking_degraded"] and item["ranking_notice"]:
+            lines.extend([f"> 注意：{item['ranking_notice']}", ""])
         if item["diffs"]:
             lines.extend(
                 [
@@ -162,19 +185,21 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 def render_html(report: dict[str, Any]) -> str:
     summary = report["summary"]
+    view = report.get("view", {})
     parts = [
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">",
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
         "<title>指标准星一致性报告</title><style>",
         "body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;max-width:1080px;margin:32px auto;padding:0 20px;color:#17212b;background:#f7f9fc;line-height:1.6}",
         "h1,h2,h3{color:#0f3d5c}table{border-collapse:collapse;width:100%;background:#fff;margin:12px 0}th,td{border:1px solid #d7e0e8;padding:7px 9px;text-align:left}",
-        "th{background:#eaf2f8}.verdict{font-weight:700;padding:2px 8px;border-radius:4px}.consistent{background:#d9f2e2}.inconsistent{background:#f8d7da}.partial{background:#fff0c2}.meta{color:#52606d}code{background:#edf2f7;padding:1px 4px}",
+        "th{background:#eaf2f8}.verdict{font-weight:700;padding:2px 8px;border-radius:4px}.consistent{background:#d9f2e2}.inconsistent{background:#f8d7da}.partial{background:#fff0c2}.meta{color:#52606d}code{background:#edf2f7;padding:1px 4px}.notice{background:#fff0c2;border:1px solid #e4cf8a;padding:6px 10px;border-radius:4px}",
         "</style></head><body>",
         "<h1>指标准星一致性报告</h1>",
         f"<p class=\"meta\">运行 #{report['run']['id']} · {html.escape(report['generated_at'])}</p>",
         f"<p>指标 {summary['metric_count']} 个；consistent {summary['consistent']}，"
         f"inconsistent {summary['inconsistent']}，partial {summary['partial']}，"
         f"漂移 {summary['drift_count']}。</p>",
+        f"<p class=\"meta\">维度视图：{html.escape(str(view.get('label', '全部')))}</p>",
         "<h2>指标明细</h2>",
     ]
     for item in report["metrics"]:
@@ -186,7 +211,8 @@ def render_html(report: dict[str, Any]) -> str:
         parts.append(
             f"<p class=\"meta\">负责人 {html.escape(item['owner'])} · 单位 "
             f"{html.escape(item['unit'])} · 粒度 {html.escape(item['grain'])} · 数据集 "
-            f"{html.escape(', '.join(item['datasets']))}</p>"
+            f"{html.escape(', '.join(item['datasets']))} · 差异维度显示 "
+            f"{item['diffs_shown']} / 共 {item['diffs_total']}</p>"
         )
         parts.append("<table><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th></tr>")
         for impl in item["implementations"]:
@@ -196,6 +222,10 @@ def render_html(report: dict[str, Any]) -> str:
                 f"<td>{impl['duration_ms']}</td></tr>"
             )
         parts.append("</table>")
+        if item["ranking_degraded"] and item["ranking_notice"]:
+            parts.append(
+                f"<p class=\"notice\">注意：{html.escape(str(item['ranking_notice']))}</p>"
+            )
         if item["diffs"]:
             parts.append("<table><tr><th>维度</th><th>类型</th>")
             for impl_id in item["impl_ids"]:

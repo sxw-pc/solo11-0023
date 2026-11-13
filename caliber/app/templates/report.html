@@ -19,9 +19,11 @@
     <div>
       <p class="eyebrow">CONSISTENCY REPORT · RUN #{{ report.run.id }}</p>
       <h1>指标一致性报告</h1>
-      <p class="lede">生成于 {{ report.generated_at }} · 状态 {{ report.run.status }}</p>
+      <p class="lede">生成于 {{ report.generated_at }} · 状态 {{ report.run.status }} · 维度视图：{{ report.view.label }}</p>
     </div>
     <div class="hero-actions">
+      <a class="button" href="/reports/{{ report.run.id }}?view=all">全部维度</a>
+      <a class="button" href="/reports/{{ report.run.id }}?view=top&amp;top=10">前 10 维度</a>
       <a class="button" href="/api/reports/{{ report.run.id }}?format=md">导出 Markdown</a>
       <a class="button" href="/api/reports/{{ report.run.id }}?format=json">导出 JSON</a>
       <a class="button" href="/api/reports/{{ report.run.id }}?format=html">独立 HTML</a>
@@ -46,9 +48,12 @@
     <div class="report-meta">
       <span>数据集：{{ item.datasets | join(', ') }}</span>
       <span>维度：{{ item.summary.dimension_count }}</span>
-      <span>差异：{{ item.summary.diff_count }}</span>
+      <span>差异：显示 {{ item.diffs_shown }} / 共 {{ item.diffs_total }}</span>
       <span>容差：abs {{ item.tolerances.abs }} / rel {{ item.tolerances.rel }}</span>
     </div>
+    {% if item.ranking_degraded %}
+    <p class="muted">注意：{{ item.ranking_notice }}</p>
+    {% endif %}
     <table>
       <thead><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th></tr></thead>
       <tbody>
@@ -69,7 +74,7 @@
           <td><code>{{ diff.dimension }}</code></td>
           <td><span class="pill {{ 'inconsistent' if diff.kind == 'value_mismatch' else 'partial' }}">{{ diff.kind }}</span></td>
           {% for impl_id in item.impl_ids %}
-            <td>{% set value = diff.values.get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
+            <td>{% set value = diff['values'].get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
           {% endfor %}
           <td>{% if diff.max_delta is none %}-{% else %}{{ "%.6g" | format(diff.max_delta) }}{% endif %}</td>
         </tr>

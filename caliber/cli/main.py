@@ -44,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--last", action="store_true", help="使用最近一次运行")
     report.add_argument("--run-id", type=int, help="指定运行 ID")
     report.add_argument("--format", choices=("json", "md", "html"), default="md")
+    report.add_argument("--view", choices=("all", "top", "dimension"), default="all",
+                        help="维度裁剪视图：全部 / 前 N 个 / 指定维度")
+    report.add_argument("--top", type=int, default=None,
+                        help="top 视图展示的差异维度数（默认 10）")
+    report.add_argument("--dimension", help="dimension 视图的目标维度名")
     report.add_argument("--output", type=Path, help="输出文件；省略则打印到标准输出")
     report.set_defaults(handler=_report)
     return parser
@@ -121,9 +126,17 @@ def _report(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) 
         if not runs:
             raise CaliberError("还没有可导出的运行记录")
         run_id = int(runs[0]["id"])
-    report = build_report(conn, run_id)
+    report = build_report(
+        conn, run_id, view=args.view, top=args.top, dimension=args.dimension
+    )
     fmt, content = export_report(report, args.format)
-    log_audit(conn, "report.export", f"run:{run_id}", "ok", {"format": fmt, "via": "cli"})
+    log_audit(
+        conn,
+        "report.export",
+        f"run:{run_id}",
+        "ok",
+        {"format": fmt, "via": "cli", "view": report["view"]["mode"]},
+    )
     if args.output:
         output = args.output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)

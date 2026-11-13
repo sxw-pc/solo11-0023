@@ -127,6 +127,28 @@ SQL 约定：
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
 
+### 4.1 维度裁剪（排序与三种视图）
+
+快照落库时，系统会对每条快照的差异维度按 `|max_delta|` 做一次**确定性稳定排序**，连同每个维度对整体结论的影响权重（`weight = |max_delta| / 所有有限 |max_delta| 之和`）一并写入快照摘要（`summary_json.dimension_ranking`）。排序在 `perform_run` 落库时一次算好（策略与理由记录在运行摘要 `runs.summary_json.dimension_ranking`），导出报告只读摘要、不重复排序；`result_json` 原始明细始终不改写、不丢失。
+
+排位规则固定，不会随机漂移：
+
+1. 有限差值按绝对值降序；
+2. 非有限值（`NaN` / `±Inf`）排在有限值之后，组内按维度名升序；
+3. 缺失值（`None`，如缺失维度）排在最后，组内按维度名升序。
+
+维度名在单条快照内唯一，因此排序键是全序的：同一批输入连续跑两次，排序结果（含权重）完全一致。
+
+报告导出支持三种维度视图（CLI 与 API 参数相同）：
+
+| 视图 | CLI | API 查询参数 | 效果 |
+| --- | --- | --- | --- |
+| 全部 | `--view all`（默认） | `view=all` | 按 `result_json` 原始顺序渲染全部差异 |
+| 前 N 个 | `--view top --top 5` | `view=top&top=5` | 按排序名次渲染前 N 个（默认 N=10） |
+| 单一维度 | `--view dimension --dimension 2026-02-03` | `view=dimension&dimension=2026-02-03` | 只渲染指定维度 |
+
+报告页 `/reports/<run_id>` 同样接受这些查询参数。历史快照缺少排序结果时，首次导出按同一确定性规则补算并回写摘要；若老快照连 `result_json.diffs` 明细都缺失，则降级为只按维度名排序，报告中给出显式提示，不会中断导出。
+
 ## 5. 目录结构
 
 ```text
@@ -167,7 +189,7 @@ caliber/
 | GET | `/api/datasets/<key>/preview` | 数据预览 |
 | POST | `/api/runs` | 触发同步比对 |
 | GET | `/api/runs` / `/api/runs/<id>` | 运行历史与快照 |
-| GET | `/api/reports/<run_id>?format=json\|md\|html` | 报告导出 |
+| GET | `/api/reports/<run_id>?format=json\|md\|html` | 报告导出（可加 `view`/`top`/`dimension` 维度视图参数） |
 
 `POST /api/runs` 示例请求体：
 

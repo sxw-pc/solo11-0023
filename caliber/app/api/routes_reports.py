@@ -17,9 +17,21 @@ MIME = {
 
 @bp.get("/<int:run_id>")
 def get_report(run_id: int):
-    report = build_report(g.db, run_id)
+    report = build_report(
+        g.db,
+        run_id,
+        view=request.args.get("view", "all"),
+        top=request.args.get("top"),
+        dimension=request.args.get("dimension"),
+    )
     fmt, payload = export_report(report, request.args.get("format", "json"))
-    log_audit(g.db, "report.export", f"run:{run_id}", "ok", {"format": fmt})
+    log_audit(
+        g.db,
+        "report.export",
+        f"run:{run_id}",
+        "ok",
+        {"format": fmt, "view": report["view"]["mode"]},
+    )
     response = Response(payload, mimetype=MIME[fmt])
     disposition = "inline" if fmt == "html" else "attachment"
     response.headers["Content-Disposition"] = f'{disposition}; filename="caliber-run-{run_id}.{fmt}"'

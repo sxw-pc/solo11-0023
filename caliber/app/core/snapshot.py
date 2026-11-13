@@ -10,9 +10,22 @@ from ..audit import log_audit, record_error
 from ..errors import CaliberError, NotFoundError, RunError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition, utc_now
 from .evaluator import run_metric
+from .ranking import RANKING_VERSION, rank_snapshot_result
 from .versioning import get_latest, list_metrics
 
 VERDICTS = ("consistent", "inconsistent", "partial")
+
+RANKING_STRATEGY = {
+    "strategy": "persisted_at_run",
+    "ranking_version": RANKING_VERSION,
+    "reason": (
+        "维度排序在 perform_run 落库时一次算好并写入快照摘要"
+        "（summary_json.dimension_ranking）：导出只读摘要即可渲染"
+        "全部/前N/单维度三种视图，多次导出零重复排序开销且结果必然一致；"
+        "代价是历史快照缺少排序，首次导出时按同一确定性规则补算并回写摘要。"
+        "result_json 原始明细始终不改写、不丢失。"
+    ),
+}
 
 
 def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
@@ -52,6 +65,11 @@ def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinitio
     result["metric"] = metric.to_dict()
     result["implementations"] = [item.to_dict() for item in evaluations.values()]
     datasets = sorted({item.source for item in evaluations.values()})
+    # 维度裁剪：落库时一次算好排序与影响权重，写入摘要；result_json 原样保留。
+    summary = {
+        **comparison.summary,
+        "dimension_ranking": rank_snapshot_result(result, generated_by="run"),
+    }
     cursor = conn.execute(
         """
         INSERT INTO snapshots(run_id, metric_key, metric_version, datasets_json,
@@ -63,13 +81,36 @@ def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinitio
             json.dumps(datasets, ensure_ascii=False),
             json.dumps(comparison.impl_ids, ensure_ascii=False),
             comparison.verdict,
-            json.dumps(comparison.summary, ensure_ascii=False),
+            json.dumps(summary, ensure_ascii=False),
             json.dumps(result, ensure_ascii=False, sort_keys=True),
             utc_now(),
         ),
     )
     conn.commit()
     return int(cursor.lastrowid or 0)
+
+
+def ensure_dimension_ranking(
+    conn: sqlite3.Connection, snapshot: dict[str, Any]
+) -> dict[str, Any]:
+    """返回快照的维度排序；旧快照缺失时按同一确定性规则补算并回写摘要。
+
+    只更新 summary_json，绝不修改 result_json。补算是幂等的：同一快照
+    重复执行得到完全一致的排序内容。
+    """
+    summary = snapshot["summary"]
+    ranking = summary.get("dimension_ranking")
+    if isinstance(ranking, dict) and ranking.get("version") == RANKING_VERSION:
+        return ranking
+    ranking = rank_snapshot_result(snapshot["result"], generated_by="backfill")
+    updated = {**summary, "dimension_ranking": ranking}
+    conn.execute(
+        "UPDATE snapshots SET summary_json = ? WHERE id = ?",
+        (json.dumps(updated, ensure_ascii=False), snapshot["id"]),
+    )
+    conn.commit()
+    snapshot["summary"] = updated
+    return ranking
 
 
 def list_snapshots(
@@ -185,6 +226,7 @@ def perform_run(
             summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id
+        summary["dimension_ranking"] = RANKING_STRATEGY
         finish_run(conn, run_id, status="completed", summary=summary)
         log_audit(conn, "run.completed", f"run:{run_id}", "ok", summary)
         return run_id
