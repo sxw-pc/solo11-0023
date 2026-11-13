@@ -88,7 +88,7 @@
           <td><strong>{{ item.key }}</strong></td>
           <td>{{ item.row_count }}</td>
           <td>{{ item.column_count }}</td>
-          <td>{{ item.encoding }}</td>
+          <td>{{ item.encoding }}{% if item.encoding_fallback %} <span class="tag">回退</span>{% endif %}{% if item.bom %} <span class="tag">BOM</span>{% endif %}</td>
           <td>{% for col in item.columns %}<span class="tag">{{ col.name }}:{{ col.type }}</span>{% endfor %}</td>
         </tr>
       {% endfor %}

@@ -84,16 +84,26 @@ class ImportSummary:
 class DatasetColumn:
     name: str
     type: str
+    # Header text as it appeared in the file, with BOM removed.
+    original_name: str | None = None
 
 
 @dataclass(slots=True)
 class DatasetMeta:
     key: str
     path: str
+    # Encoding actually used to decode the file (utf-8 / utf-8-sig / gbk / latin-1).
     encoding: str
     row_count: int
     column_count: int
     columns: list[DatasetColumn]
+    # True when the file did not decode as UTF-8 and a fallback was used.
+    encoding_fallback: bool = False
+    # Whether the file started with a UTF-8 byte-order mark.
+    bom: bool = False
+    # Provenance for this load: content fingerprint, probe chain, inference
+    # policy and the cache decision.  Populated by the dataset loader.
+    load_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

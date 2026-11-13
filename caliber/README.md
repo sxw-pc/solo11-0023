@@ -109,6 +109,19 @@ SQL 约定：
 
 校验器会检查 key 格式、粒度枚举、至少两个实现、实现 ID 重复、SQL 文件存在性及路径白名单。错误以字段级列表返回。
 
+### 3.1 CSV 数据集的编码与类型推断
+
+`app/core/dataset_loader.py` 把数据集目录中的 `*.csv` 读入内存 SQLite，加载元信息记录在 `DatasetMeta` 中：
+
+- **编码探测**：先按严格 UTF-8 解码（文件带 BOM 时记录为 `utf-8-sig`），失败后退到 GBK，再退到 latin-1。`DatasetMeta.encoding` 是实际采用的编码，`encoding_fallback` 表示是否发生回退，`bom` 表示是否存在 UTF-8 BOM。表头规范化会先去掉 BOM 再生成列名，`DatasetColumn.original_name` 保留原列名。
+- **类型推断**：跳过空单元格，只用非空样本推断 `int` / `float` / `date` / `str`。整列都没有非空样本时标记为 `unknown`（建表仍用 TEXT 以容纳空值），不会误判成 `str`，因此先空后数值的列能按数值参与 SQL 比较。
+- **缓存策略**：编码探测与类型推断对同一文件在**一次 `load_catalog` 构建内只执行一次**，结果写入该 catalog 的 `DatasetMeta.load_metadata`；**不在多次 `load_catalog` 之间复用**。CSV 是可变的本地输入，跨调用缓存需要指纹失效，仍可能读到过期元信息；而检测过程是确定性的（文件按名称排序、全量样本、无随机采样），同一目录重复加载得到完全相同的元信息。`load_metadata.source.sha256` 记录本次元信息对应的文件内容指纹，便于审计。
+- **回退与失败**：单个文件解码/解析失败不会中断整批加载，失败记录写入 `DatasetCatalog.errors`，包含文件路径、原因、行号与列名；若目录内全部文件失败，构造器抛出聚合 `DatasetError`。二进制内容或 latin-1 结果中的 C1 控制字符会被判定为无法解码并定位到具体行列。
+- **读取一致性**：文件通过单个句柄读取并比对读取前后的 inode/大小/mtime，若读取期间被替换或修改则重试一次；仍不稳定则以 `file_changed_during_read` 报错，避免混合两个版本的内容。
+- **key 冲突**：同一目录中规范化后同名的文件不会互相覆盖元信息，后一个文件以 `duplicate_key` 记入 `errors`，先加载的元信息保持不变。
+
+`GET /api/datasets` 的响应同时返回 `datasets` 和 `errors` 两个列表。
+
 ## 4. 一致性判定规则
 
 对同一指标的每个实现，分别得到 `维度 -> 数值` 的字典，然后对所有实现的结果取维度并集逐项比较。数值相等判定为：

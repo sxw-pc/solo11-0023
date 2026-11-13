@@ -92,6 +92,13 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
     datasets_dir = (args.datasets or config.datasets_dir).expanduser().resolve()
     keys = [item.strip() for item in args.metrics.split(",") if item.strip()] if args.metrics else None
     catalog = load_catalog(datasets_dir)
+    for error in catalog.errors:
+        prefix = f"{error['file']}: "
+        detail = error["message"][len(prefix):] if error["message"].startswith(prefix) else error["message"]
+        print(
+            f"警告 跳过无法加载的数据集 {error['file']}: {detail}",
+            file=sys.stderr,
+        )
     try:
         run_id = perform_run(
             conn,

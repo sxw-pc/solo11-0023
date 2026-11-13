@@ -114,6 +114,23 @@ def test_run_with_tolerance_fields(imported_client, app_config):
     assert response.status_code == 400
 
 
+def test_dataset_api_surfaces_encoding_and_load_errors(imported_client, app_config):
+    datasets = app_config.datasets_dir
+    (datasets / "legacy.csv").write_bytes("编号,金额\n1,2.5\n".encode("gbk"))
+    (datasets / "broken.csv").write_bytes(b"\x00\x01\x02")
+    response = imported_client.get("/api/datasets")
+    assert response.status_code == 200
+    payload = response.get_json()
+    legacy = next(item for item in payload["datasets"] if item["key"] == "legacy")
+    assert legacy["encoding"] == "gbk"
+    assert legacy["encoding_fallback"] is True
+    assert [column["type"] for column in legacy["columns"]] == ["int", "float"]
+    assert [item["file"].rsplit("/", 1)[-1] for item in payload["errors"]] == [
+        "broken.csv"
+    ]
+    assert payload["errors"][0]["details"]["reason"] == "binary_content"
+
+
 def test_web_pages_are_local_and_render(imported_client, app_config):
     home = imported_client.get("/")
     assert home.status_code == 200
