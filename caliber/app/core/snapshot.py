@@ -185,6 +185,9 @@ def perform_run(
             summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id
+        refresh_report = getattr(catalog, "refresh_report", None)
+        if refresh_report:
+            summary["catalog_refresh"] = refresh_report
         finish_run(conn, run_id, status="completed", summary=summary)
         log_audit(conn, "run.completed", f"run:{run_id}", "ok", summary)
         return run_id

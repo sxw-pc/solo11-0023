@@ -88,11 +88,47 @@ def _import_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Conn
     return 0 if summary.ok else 1
 
 
+def _print_catalog_refresh(report: dict) -> None:
+    if not report:
+        return
+    if report.get("degraded"):
+        reason = report.get("degrade_reason") or "unknown"
+        print(
+            f"提示: 目录快照不可用（{reason}），已降级为全量扫描并尝试重新生成快照",
+            file=sys.stderr,
+        )
+    for warning in report.get("warnings", []):
+        print(f"提示: {warning}", file=sys.stderr)
+    for item in report.get("stale", []):
+        print(
+            f"提示: 数据集文件已删除，{item.get('key')}（{item.get('file')}）"
+            "本次比对已排除，处置记录已保留在快照中",
+            file=sys.stderr,
+        )
+    if report.get("snapshot_enabled"):
+        state = "已更新" if report.get("snapshot_written") else "无变化，未重写"
+        snapshot_info = f"{report.get('snapshot_path')}（{state}）"
+    else:
+        snapshot_info = "未启用"
+    print(
+        "目录刷新: 复用 {reused}，重解析 {reparsed}，新增 {added}，失效 {stale}"
+        "（模式: {mode}，快照: {snapshot}）".format(
+            reused=len(report.get("reused", [])),
+            reparsed=len(report.get("reparsed", [])),
+            added=len(report.get("added", [])),
+            stale=len(report.get("stale", [])),
+            mode=report.get("mode", "full"),
+            snapshot=snapshot_info,
+        )
+    )
+
+
 def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
     datasets_dir = (args.datasets or config.datasets_dir).expanduser().resolve()
     keys = [item.strip() for item in args.metrics.split(",") if item.strip()] if args.metrics else None
     catalog = load_catalog(datasets_dir)
     try:
+        _print_catalog_refresh(catalog.refresh_report)
         run_id = perform_run(
             conn,
             keys,
