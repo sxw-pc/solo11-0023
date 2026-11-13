@@ -9,6 +9,7 @@ from ..models import MetricDefinition, ValidationIssue
 
 KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,40}$")
 IMPL_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
+AXIS_PATTERN = re.compile(r"^[A-Za-z_一-鿿][0-9A-Za-z_一-鿿]*$")
 ALLOWED_GRAINS = {"day", "week", "month"}
 
 
@@ -52,6 +53,14 @@ def validate_definition(
         add("unit", "required", "unit 不能为空")
     if metric.grain not in ALLOWED_GRAINS:
         add("grain", "enum", "grain 必须是 day/week/month 之一")
+    seen_axes: set[str] = set()
+    for index, axis in enumerate(metric.grain_axes):
+        field_name = f"grain_axes[{index}]"
+        if not AXIS_PATTERN.fullmatch(axis or ""):
+            add(field_name, "pattern", "粒度轴列名只能包含字母、数字、下划线或中文，且不能以数字开头")
+        elif axis in seen_axes:
+            add(field_name, "duplicate", f"粒度轴列名重复: {axis}")
+        seen_axes.add(axis)
     if len(metric.impls) < 2:
         add("impls", "min_items", "至少需要两个实现才能进行一致性比对")
 

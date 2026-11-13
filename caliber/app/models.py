@@ -26,6 +26,8 @@ class MetricDefinition:
     unit: str
     grain: str
     impls: list[ImplementDef]
+    # 结构化粒度轴（一组结果列名）。空列表 = 未声明，走历史总量/维度比对。
+    grain_axes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -41,6 +43,13 @@ class MetricDefinition:
             for item in data.get("impls", [])
             if isinstance(item, Mapping)
         ]
+        # 历史 definition_json 没有 grain_axes 键，按未声明处理（兼容读取）。
+        raw_axes = data.get("grain_axes")
+        grain_axes = (
+            [str(axis).strip() for axis in raw_axes if str(axis).strip()]
+            if isinstance(raw_axes, list)
+            else []
+        )
         return cls(
             key=str(data.get("key", "")),
             name=str(data.get("name", "")),
@@ -49,6 +58,7 @@ class MetricDefinition:
             unit=str(data.get("unit", "")),
             grain=str(data.get("grain", "")),
             impls=impls,
+            grain_axes=grain_axes,
         )
 
 
@@ -107,6 +117,9 @@ class ImplEvaluation:
     values: dict[str, float]
     row_count: int
     duration_ms: float
+    # 粒度轴模式下记录 SQL 实际返回的列名与缺失的声明轴，用于对齐诊断。
+    columns: list[str] = field(default_factory=list)
+    missing_axes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -132,6 +145,8 @@ class ComparisonResult:
     summary: dict[str, Any]
     abs_tolerance: float
     rel_tolerance: float
+    # 粒度轴逐组对齐明细；legacy_total 模式下为 None。只进 result_json 扩展。
+    grain_alignment: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

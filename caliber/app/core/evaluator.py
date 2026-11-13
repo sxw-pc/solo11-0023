@@ -10,7 +10,7 @@ from typing import Any
 
 from ..errors import EvaluationError, EvaluationTimeout, UnsafeSQLError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition
-from .comparator import compare_impl_results
+from .comparator import compare_grain_results, compare_impl_results
 from .dsl_validator import resolve_sql_path
 
 FORBIDDEN = re.compile(

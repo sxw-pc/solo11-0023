@@ -9,12 +9,34 @@ import yaml
 from ..errors import DslParseError
 from ..models import ImplementDef, MetricDefinition, ValidationIssue
 
-TOP_FIELDS = {"key", "name", "owner", "description", "unit", "grain", "impls"}
+TOP_FIELDS = {"key", "name", "owner", "description", "unit", "grain", "grain_axes", "impls"}
 IMPL_FIELDS = {"id", "source", "sql_file"}
 
 
 def _issue(field: str, code: str, message: str) -> ValidationIssue:
     return ValidationIssue(field=field, code=code, message=message)
+
+
+def _parse_grain_axes(raw: Any, issues: list[ValidationIssue]) -> list[str]:
+    """Optional structured grain-axis declaration: a list of column names.
+
+    Absent (or null) means "not declared" and keeps the legacy total/dimension
+    comparison; that is the documented downgrade path for historical YAML.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        issues.append(_issue("grain_axes", "type", "grain_axes 必须是字符串列表"))
+        return []
+    axes: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, str) or not item.strip():
+            issues.append(
+                _issue(f"grain_axes[{index}]", "required", "粒度轴列名必须是非空字符串")
+            )
+            continue
+        axes.append(item.strip())
+    return axes
 
 
 def _parse_impls(raw: Any, issues: list[ValidationIssue]) -> list[ImplementDef]:
@@ -84,6 +106,7 @@ def parse_metric_text(text: str, source: str = "<string>") -> MetricDefinition:
             if name != "description" and not values[name]:
                 issues.append(_issue(name, "required", f"{name} 不能为空"))
     impls = _parse_impls(raw.get("impls"), issues)
+    grain_axes = _parse_grain_axes(raw.get("grain_axes"), issues)
 
     if issues:
         raise DslParseError(
@@ -99,6 +122,7 @@ def parse_metric_text(text: str, source: str = "<string>") -> MetricDefinition:
         unit=values["unit"],
         grain=values["grain"],
         impls=impls,
+        grain_axes=grain_axes,
     )
 
 
