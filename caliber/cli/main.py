@@ -38,6 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--datasets", type=Path, help="CSV 数据集目录")
     run.add_argument("--abs-tol", type=float, default=None, help="绝对容差")
     run.add_argument("--rel-tol", type=float, default=None, help="相对容差")
+    run.add_argument(
+        "--consensus-threshold", type=float, default=None,
+        help="共识阈值（0~1）；省略且未配置环境变量时不做跨实现仲裁",
+    )
+    run.add_argument(
+        "--arbitration-strategy", choices=("impl_cluster", "dimension_vote"), default=None,
+        help="仲裁策略：impl_cluster（默认）或 dimension_vote",
+    )
     run.set_defaults(handler=_run)
 
     report = sub.add_parser("report", help="导出比对报告")
@@ -92,6 +100,12 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
     datasets_dir = (args.datasets or config.datasets_dir).expanduser().resolve()
     keys = [item.strip() for item in args.metrics.split(",") if item.strip()] if args.metrics else None
     catalog = load_catalog(datasets_dir)
+    threshold = (
+        config.consensus_threshold
+        if args.consensus_threshold is None
+        else args.consensus_threshold
+    )
+    strategy = args.arbitration_strategy or config.arbitration_strategy
     try:
         run_id = perform_run(
             conn,
@@ -103,6 +117,8 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
             max_rows=config.max_result_rows,
             abs_tolerance=config.abs_tolerance if args.abs_tol is None else args.abs_tol,
             rel_tolerance=config.rel_tolerance if args.rel_tol is None else args.rel_tol,
+            consensus_threshold=threshold,
+            arbitration_strategy=strategy,
         )
     finally:
         catalog.close()

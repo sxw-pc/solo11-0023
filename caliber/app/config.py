@@ -27,6 +27,8 @@ class Config:
     max_result_rows: int = 10_000
     abs_tolerance: float = 1e-6
     rel_tolerance: float = 0.0
+    consensus_threshold: float | None = None
+    arbitration_strategy: str = "impl_cluster"
     testing: bool = False
 
     @classmethod
@@ -37,6 +39,15 @@ class Config:
         host = os.environ.get("CALIBER_HOST", "127.0.0.1")
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("CALIBER_HOST 只允许回环地址")
+        raw_threshold = os.environ.get("CALIBER_CONSENSUS_THRESHOLD", "").strip()
+        threshold: float | None = None
+        if raw_threshold:
+            try:
+                threshold = float(raw_threshold)
+            except ValueError as exc:
+                raise ValueError("CALIBER_CONSENSUS_THRESHOLD 必须是数值") from exc
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError("CALIBER_CONSENSUS_THRESHOLD 必须在 0 到 1 之间")
         return cls(
             data_dir=data_dir,
             db_path=Path(os.environ.get("CALIBER_DB", data_dir / "caliber.sqlite3")),
@@ -46,6 +57,10 @@ class Config:
             sql_roots=(fixtures / "impls",),
             host=host,
             port=int(os.environ.get("CALIBER_PORT", "5057")),
+            consensus_threshold=threshold,
+            arbitration_strategy=os.environ.get(
+                "CALIBER_ARBITRATION_STRATEGY", "impl_cluster"
+            ),
         )
 
     def ensure_dirs(self) -> None:

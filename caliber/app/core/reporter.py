@@ -26,49 +26,251 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         key = snapshot["metric_key"]
         keys.add(key)
         counts[snapshot["verdict"]] = counts.get(snapshot["verdict"], 0) + 1
-        metrics.append(
-            {
-                "key": key,
-                "name": definition.get("name", key),
-                "owner": definition.get("owner", ""),
-                "description": definition.get("description", ""),
-                "unit": definition.get("unit", ""),
-                "grain": definition.get("grain", ""),
-                "version": snapshot["metric_version"],
-                "verdict": snapshot["verdict"],
-                "datasets": snapshot["datasets"],
-                "impl_ids": snapshot["impl_ids"],
-                "summary": snapshot["summary"],
-                "dimensions": result.get("dimensions", []),
-                "diffs": result.get("diffs", []),
-                "implementations": result.get("implementations", []),
-                "tolerances": {
-                    "abs": result.get("abs_tolerance"),
-                    "rel": result.get("rel_tolerance"),
-                },
-                "snapshot_id": snapshot["id"],
-            }
-        )
+        arbitration = result.get("arbitration")
+        entry = {
+            "key": key,
+            "name": definition.get("name", key),
+            "owner": definition.get("owner", ""),
+            "description": definition.get("description", ""),
+            "unit": definition.get("unit", ""),
+            "grain": definition.get("grain", ""),
+            "version": snapshot["metric_version"],
+            "verdict": snapshot["verdict"],
+            "datasets": snapshot["datasets"],
+            "impl_ids": snapshot["impl_ids"],
+            "summary": snapshot["summary"],
+            "dimensions": result.get("dimensions", []),
+            "diffs": result.get("diffs", []),
+            "implementations": result.get("implementations", []),
+            "tolerances": {
+                "abs": result.get("abs_tolerance"),
+                "rel": result.get("rel_tolerance"),
+            },
+            "snapshot_id": snapshot["id"],
+        }
+        # Old snapshots have neither field; do not synthesize them so old
+        # reports export byte-for-byte the same structure.
+        if isinstance(arbitration, dict):
+            entry["arbitration"] = arbitration
+        if result.get("impl_failures"):
+            entry["impl_failures"] = result["impl_failures"]
+        metrics.append(entry)
+    arbitration_summary = _arbitration_report_summary(metrics)
     drift_events: list[dict[str, Any]] = []
     for key in sorted(keys):
         drift_events.extend(detect_drift(conn, key))
+    summary_payload: dict[str, Any] = {
+        "metric_count": len(metrics),
+        **counts,
+        "drift_count": len(drift_events),
+    }
+    if arbitration_summary.get("enabled"):
+        summary_payload["arbitration"] = arbitration_summary
     return {
         "report_version": "1.0",
         "generated_at": utc_now(),
         "run": run,
-        "summary": {
-            "metric_count": len(metrics),
-            **counts,
-            "drift_count": len(drift_events),
-        },
+        "summary": summary_payload,
         "metrics": metrics,
         "drift_events": drift_events,
         "audit": list_audit(conn, 50),
     }
 
 
+def _arbitration_report_summary(metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate arbitration presence without changing reports from old runs."""
+    enabled = [item for item in metrics if isinstance(item.get("arbitration"), dict)]
+    if not enabled:
+        return {"enabled": False}
+    statuses: dict[str, int] = {}
+    non_arbitrable = 0
+    metrics_with_dissent = 0
+    for item in enabled:
+        arbitration = item["arbitration"]
+        status = str(arbitration.get("status", "degraded"))
+        statuses[status] = statuses.get(status, 0) + 1
+        non_arbitrable += len(arbitration.get("non_arbitrable", []))
+        if arbitration.get("dissenters"):
+            metrics_with_dissent += 1
+    first = enabled[0]["arbitration"]
+    return {
+        "enabled": True,
+        "strategy": first.get("strategy"),
+        "threshold": first.get("threshold"),
+        "metrics_arbitrated": len(enabled),
+        "statuses": statuses,
+        "metrics_with_dissent": metrics_with_dissent,
+        "non_arbitrable_impls": non_arbitrable,
+        "selection": first.get("selection", {}),
+    }
+
+
 def render_json(report: dict[str, Any]) -> str:
     return json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _append_arbitration_markdown(item: dict[str, Any], lines: list[str]) -> None:
+    arbitration = item.get("arbitration")
+    if not isinstance(arbitration, dict):
+        _append_impl_failures_markdown(item, lines)
+        return
+    status = arbitration.get("status", "degraded")
+    consensus = arbitration.get("consensus_group") or []
+    lines.extend(
+        [
+            "### 跨实现仲裁",
+            "",
+            f"- 状态：{status}；策略：{arbitration.get('strategy')}；"
+            f"共识阈值：{arbitration.get('threshold')}",
+            f"- 共识组：{', '.join(consensus) if consensus else '未形成'}",
+        ]
+    )
+    dissenters = arbitration.get("dissenters") or []
+    if dissenters:
+        lines.append(
+            "- 异议方："
+            + ", ".join(
+                f"{entry['impl_id']}（分歧维度: "
+                f"{', '.join(entry.get('dissent_dimensions', [])) or '无'}）"
+                for entry in dissenters
+            )
+        )
+    if arbitration.get("dissent_dimensions"):
+        lines.append(f"- 异议维度：{', '.join(arbitration['dissent_dimensions'])}")
+    detail = arbitration.get("max_divergence_detail") or {}
+    if detail:
+        lines.append(
+            f"- 最大分歧：{_cell(detail.get('delta'))}（{detail.get('left')} / "
+            f"{detail.get('right')} @ {detail.get('dimension')}）"
+        )
+    for entry in dissenters:
+        lines.extend(
+            [
+                "",
+                f"异议实现 `{entry['impl_id']}`：{entry.get('reason', '')}",
+                "",
+                "| 维度 | 类型 | 实现值 | 共识值 | 差值 |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for row in entry.get("dissent_details", []):
+            lines.append(
+                f"| {_cell(row.get('dimension'))} | {_cell(row.get('kind'))} | "
+                f"{_cell(row.get('impl_value'))} | {_cell(row.get('consensus_value'))} | "
+                f"{_cell(row.get('delta'))} |"
+            )
+        lines.append("")
+    minority = arbitration.get("minority") or []
+    if minority:
+        lines.append(
+            "- 共识组内轻微偏离："
+            + ", ".join(
+                f"{entry['impl_id']}（{', '.join(entry.get('minority_dimensions', []))}）"
+                for entry in minority
+            )
+        )
+    degraded = arbitration.get("degraded")
+    if degraded:
+        lines.append(
+            f"- 降级原因：{degraded.get('reason')}"
+            + (f"（{degraded['detail']}）" if degraded.get("detail") else "")
+        )
+    non_arbitrable = arbitration.get("non_arbitrable") or []
+    if non_arbitrable:
+        lines.extend(
+            ["", "| 不可仲裁实现 | 阶段 | 原因 |", "| --- | --- | --- |"]
+        )
+        for failure in non_arbitrable:
+            lines.append(
+                f"| {_cell(failure.get('impl_id'))} | {_cell(failure.get('stage'))} | "
+                f"{_cell(failure.get('reason'))} |"
+            )
+    lines.append("")
+
+
+def _append_impl_failures_markdown(item: dict[str, Any], lines: list[str]) -> None:
+    if not item.get("impl_failures"):
+        return
+    lines.extend(["**不可仲裁实现**", "", "| 实现 | 阶段 | 原因 |", "| --- | --- | --- |"])
+    for failure in item["impl_failures"]:
+        lines.append(
+            f"| {_cell(failure.get('impl_id'))} | {_cell(failure.get('stage'))} | "
+            f"{_cell(failure.get('reason'))} |"
+        )
+    lines.append("")
+
+
+def _append_arbitration_html(item: dict[str, Any], parts: list[str]) -> None:
+    arbitration = item.get("arbitration")
+    if not isinstance(arbitration, dict):
+        return
+    status = html.escape(str(arbitration.get("status", "degraded")))
+    consensus = ", ".join(arbitration.get("consensus_group") or []) or "未形成"
+    parts.append(
+        f"<h3>跨实现仲裁 <span class=\"verdict "
+        f"{'consistent' if arbitration.get('status') == 'ok' else 'partial'}\">"
+        f"{status}</span></h3>"
+    )
+    parts.append(
+        f"<p class=\"meta\">策略 {html.escape(str(arbitration.get('strategy')))} · "
+        f"共识阈值 {html.escape(str(arbitration.get('threshold')))} · "
+        f"共识组 {html.escape(consensus)}</p>"
+    )
+    dissenters = arbitration.get("dissenters") or []
+    if dissenters:
+        parts.append(
+            "<p>异议方："
+            + "；".join(
+                f"<strong>{html.escape(str(entry['impl_id']))}</strong>"
+                f"（分歧维度 {html.escape(', '.join(entry.get('dissent_dimensions', [])) or '无')}）"
+                for entry in dissenters
+            )
+            + "</p>"
+        )
+        for entry in dissenters:
+            parts.append("<table><tr><th>维度</th><th>类型</th><th>实现值</th><th>共识值</th><th>差值</th></tr>")
+            for row in entry.get("dissent_details", []):
+                parts.append(
+                    f"<tr><td>{html.escape(str(row.get('dimension')))}</td>"
+                    f"<td>{html.escape(str(row.get('kind')))}</td>"
+                    f"<td>{html.escape(_cell(row.get('impl_value')))}</td>"
+                    f"<td>{html.escape(_cell(row.get('consensus_value')))}</td>"
+                    f"<td>{html.escape(_cell(row.get('delta')))}</td></tr>"
+                )
+            parts.append("</table>")
+    detail = arbitration.get("max_divergence_detail") or {}
+    if detail:
+        parts.append(
+            f"<p class=\"meta\">最大分歧 {html.escape(_cell(detail.get('delta')))}"
+            f"（{html.escape(str(detail.get('left')))} / {html.escape(str(detail.get('right')))}"
+            f" @ {html.escape(str(detail.get('dimension')))}）</p>"
+        )
+    minority = arbitration.get("minority") or []
+    if minority:
+        parts.append(
+            "<p>共识组内轻微偏离："
+            + "；".join(
+                f"{html.escape(str(entry['impl_id']))}（"
+                f"{html.escape(', '.join(entry.get('minority_dimensions', [])))}）"
+                for entry in minority
+            )
+            + "</p>"
+        )
+    degraded = arbitration.get("degraded")
+    if degraded:
+        parts.append(
+            f"<p class=\"meta\">降级原因：{html.escape(str(degraded.get('reason')))}</p>"
+        )
+    non_arbitrable = arbitration.get("non_arbitrable") or []
+    if non_arbitrable:
+        parts.append("<table><tr><th>不可仲裁实现</th><th>阶段</th><th>原因</th></tr>")
+        for failure in non_arbitrable:
+            parts.append(
+                f"<tr><td>{html.escape(str(failure.get('impl_id')))}</td>"
+                f"<td>{html.escape(str(failure.get('stage')))}</td>"
+                f"<td>{html.escape(str(failure.get('reason')))}</td></tr>"
+            )
+        parts.append("</table>")
 
 
 def _cell(value: Any) -> str:
@@ -141,6 +343,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                     f"{_cell(diff.get('max_delta'))} |"
                 )
             lines.append("")
+        _append_arbitration_markdown(item, lines)
     lines.extend(["## 漂移事件", ""])
     if report["drift_events"]:
         for event in report["drift_events"]:
@@ -210,6 +413,7 @@ def render_html(report: dict[str, Any]) -> str:
                     parts.append(f"<td>{html.escape(_cell(diff['values'].get(impl_id)))}</td>")
                 parts.append(f"<td>{html.escape(_cell(diff.get('max_delta')))}</td></tr>")
             parts.append("</table>")
+        _append_arbitration_html(item, parts)
     parts.append("<h2>漂移事件</h2>")
     if report["drift_events"]:
         parts.append("<ul>")

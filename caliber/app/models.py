@@ -113,6 +113,25 @@ class ImplEvaluation:
 
 
 @dataclass(slots=True)
+class ImplFailure:
+    """A single implementation that could not be evaluated.
+
+    Failed implementations are excluded from cross-implementation voting and
+    are reported as non-arbitrable instead of being treated as dissenters.
+    """
+
+    impl_id: str
+    source: str
+    sql_file: str
+    stage: str
+    code: str
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class DimensionDiff:
     dimension: str
     kind: str
@@ -132,7 +151,16 @@ class ComparisonResult:
     summary: dict[str, Any]
     abs_tolerance: float
     rel_tolerance: float
+    arbitration: dict[str, Any] | None = None
+    impl_failures: list[ImplFailure] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # Keep the historical result_json shape when the new layers are off:
+        # disabled arbitration and no failures must not add fields.
+        if data.get("arbitration") is None:
+            data.pop("arbitration", None)
+        if not data.get("impl_failures"):
+            data.pop("impl_failures", None)
+        return data
 

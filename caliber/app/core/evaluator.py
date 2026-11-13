@@ -8,8 +8,19 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from ..errors import EvaluationError, EvaluationTimeout, UnsafeSQLError
-from ..models import ComparisonResult, ImplEvaluation, MetricDefinition
+from ..errors import (
+    CaliberError,
+    EvaluationError,
+    EvaluationTimeout,
+    UnsafeSQLError,
+)
+from ..models import ComparisonResult, ImplEvaluation, ImplFailure, MetricDefinition
+from .arbitration import (
+    DEFAULT_STRATEGY,
+    arbitrate,
+    validate_strategy,
+    validate_threshold,
+)
 from .comparator import compare_impl_results
 from .dsl_validator import resolve_sql_path
 
@@ -191,24 +202,43 @@ def evaluate_metric_impls(
     *,
     timeout_seconds: float = 5.0,
     max_rows: int = 10_000,
+    collect_failures: bool = False,
+    failures: list[ImplFailure] | None = None,
 ) -> dict[str, ImplEvaluation]:
+    """Evaluate every implementation of a metric.
+
+    By default the first failure aborts with an exception (historical
+    behaviour).  With ``collect_failures=True`` each failed implementation is
+    recorded in ``failures`` and evaluation continues with the remaining
+    implementations, so one broken implementation cannot abort a run.
+    """
     results: dict[str, ImplEvaluation] = {}
     conn = catalog.readonly_connection()
     for impl in metric.impls:
-        catalog.require(impl.source)
-        sql_path = resolve_sql_path(impl.sql_file, sql_roots)
         try:
-            sql = sql_path.read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            raise EvaluationError(f"无法读取 SQL 文件: {sql_path}: {exc}") from exc
-        values, row_count, duration = evaluate_sql(
-            conn,
-            sql,
-            timeout_seconds=timeout_seconds,
-            max_rows=max_rows,
-            grain=metric.grain,
-            impl_id=impl.id,
-        )
+            catalog.require(impl.source)
+            sql_path = resolve_sql_path(impl.sql_file, sql_roots)
+            try:
+                sql = sql_path.read_text(encoding="utf-8-sig")
+            except OSError as exc:
+                raise EvaluationError(
+                    f"无法读取 SQL 文件: {sql_path}: {exc}"
+                ) from exc
+            values, row_count, duration = evaluate_sql(
+                conn,
+                sql,
+                timeout_seconds=timeout_seconds,
+                max_rows=max_rows,
+                grain=metric.grain,
+                impl_id=impl.id,
+            )
+        except Exception as exc:
+            if not collect_failures:
+                raise
+            failure = _impl_failure(impl, exc)
+            if failures is not None:
+                failures.append(failure)
+            continue
         results[impl.id] = ImplEvaluation(
             impl_id=impl.id,
             source=impl.source,
@@ -218,6 +248,31 @@ def evaluate_metric_impls(
             duration_ms=round(duration, 3),
         )
     return results
+
+
+def _impl_failure(impl: Any, exc: Exception) -> ImplFailure:
+    if isinstance(exc, CaliberError):
+        code = exc.code
+        reason = exc.message
+    else:
+        code = "internal_error"
+        reason = f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, EvaluationTimeout):
+        stage = "timeout"
+    elif isinstance(exc, EvaluationError):
+        stage = "evaluation"
+    elif isinstance(exc, CaliberError):
+        stage = "precondition"
+    else:
+        stage = "internal"
+    return ImplFailure(
+        impl_id=impl.id,
+        source=impl.source,
+        sql_file=impl.sql_file,
+        stage=stage,
+        code=code,
+        reason=reason,
+    )
 
 
 def run_metric(
@@ -230,7 +285,16 @@ def run_metric(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    consensus_threshold: float | None = None,
+    arbitration_strategy: str | None = None,
 ) -> tuple[ComparisonResult, dict[str, ImplEvaluation]]:
+    threshold = validate_threshold(consensus_threshold)
+    strategy = (
+        validate_strategy(arbitration_strategy)
+        if threshold is not None
+        else DEFAULT_STRATEGY
+    )
+    failures: list[ImplFailure] = []
     evaluations = evaluate_metric_impls(
         metric,
         version,
@@ -238,6 +302,8 @@ def run_metric(
         sql_roots,
         timeout_seconds=timeout_seconds,
         max_rows=max_rows,
+        collect_failures=threshold is not None,
+        failures=failures,
     )
     comparison = compare_impl_results(
         {impl_id: item.values for impl_id, item in evaluations.items()},
@@ -246,4 +312,55 @@ def run_metric(
         abs_tolerance=abs_tolerance,
         rel_tolerance=rel_tolerance,
     )
+    if failures:
+        comparison.impl_failures = list(failures)
+        comparison.summary["failed_impl_count"] = len(failures)
+        comparison.summary["failed_impl_ids"] = [item.impl_id for item in failures]
+        if comparison.verdict == "consistent":
+            # A failed implementation was never compared; calling the metric
+            # fully consistent would hide that fact.
+            comparison.verdict = "partial"
+            comparison.summary["degraded_verdict"] = "存在未成功求值的实现"
+    if threshold is not None:
+        impl_order = [impl.id for impl in metric.impls]
+        try:
+            comparison.arbitration = arbitrate(
+                {impl_id: item.values for impl_id, item in evaluations.items()},
+                failures,
+                abs_tolerance=abs_tolerance,
+                rel_tolerance=rel_tolerance,
+                threshold=threshold,
+                strategy=strategy,
+                impl_order=impl_order,
+            )
+        except Exception as exc:  # never let arbitration abort the metric
+            comparison.arbitration = {
+                "enabled": True,
+                "status": "degraded",
+                "strategy": strategy,
+                "threshold": threshold,
+                "degraded": {
+                    "code": "arbitration_error",
+                    "reason": "仲裁计算异常，已保留原有维度比对结果",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                },
+                "consensus_group": [],
+                "dissenters": [],
+                "dissent_dimensions": [],
+                "minority": [],
+                "max_divergence": 0.0,
+                "max_divergence_detail": None,
+                "pairwise": [],
+                "non_arbitrable": [item.to_dict() for item in failures],
+                "impl_classification": {},
+                "summary": {
+                    "impl_count": len(impl_order),
+                    "arbitrable_impl_count": len(evaluations),
+                    "consensus_count": 0,
+                    "dissenter_count": 0,
+                    "non_arbitrable_count": len(failures),
+                    "dissent_dimension_count": 0,
+                },
+            }
+        comparison.summary["arbitration_status"] = comparison.arbitration["status"]
     return comparison, evaluations

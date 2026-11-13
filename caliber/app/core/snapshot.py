@@ -9,6 +9,14 @@ from typing import Any
 from ..audit import log_audit, record_error
 from ..errors import CaliberError, NotFoundError, RunError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition, utc_now
+from .arbitration import (
+    ALTERNATIVES,
+    CHOICE_RATIONALE,
+    DEFAULT_STRATEGY,
+    SWITCH_POINT,
+    validate_strategy,
+    validate_threshold,
+)
 from .evaluator import run_metric
 from .versioning import get_latest, list_metrics
 
@@ -51,6 +59,7 @@ def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinitio
     result = comparison.to_dict()
     result["metric"] = metric.to_dict()
     result["implementations"] = [item.to_dict() for item in evaluations.values()]
+    impl_ids = list(comparison.impl_ids)
     datasets = sorted({item.source for item in evaluations.values()})
     cursor = conn.execute(
         """
@@ -61,7 +70,7 @@ def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinitio
         (
             run_id, metric.key, comparison.metric_version,
             json.dumps(datasets, ensure_ascii=False),
-            json.dumps(comparison.impl_ids, ensure_ascii=False),
+            json.dumps(impl_ids, ensure_ascii=False),
             comparison.verdict,
             json.dumps(comparison.summary, ensure_ascii=False),
             json.dumps(result, ensure_ascii=False, sort_keys=True),
@@ -159,10 +168,18 @@ def perform_run(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    consensus_threshold: float | None = None,
+    arbitration_strategy: str | None = None,
 ) -> int:
     keys = list(dict.fromkeys(metric_keys or [item["key"] for item in list_metrics(conn)]))
     if not keys:
         raise RunError("没有可执行的指标，请先导入指标定义")
+    threshold = validate_threshold(consensus_threshold)
+    strategy = (
+        validate_strategy(arbitration_strategy)
+        if threshold is not None
+        else DEFAULT_STRATEGY
+    )
     tolerances = {"abs": float(abs_tolerance), "rel": float(rel_tolerance)}
     run_id = create_run(conn, keys, datasets_dir, tolerances)
     log_audit(conn, "run.started", f"run:{run_id}", "ok", {"metrics": keys})
@@ -180,11 +197,46 @@ def perform_run(
                 max_rows=max_rows,
                 abs_tolerance=abs_tolerance,
                 rel_tolerance=rel_tolerance,
+                consensus_threshold=threshold,
+                arbitration_strategy=strategy,
             )
             save_snapshot(conn, run_id, metric, comparison, evaluations)
             summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
+            if threshold is not None:
+                arbitration = comparison.arbitration or {}
+                counts = summary.setdefault(
+                    "arbitration",
+                    {
+                        "ok": 0,
+                        "degraded": 0,
+                        "non_arbitrable_impls": 0,
+                        "dissent_metrics": 0,
+                    },
+                )
+                status = arbitration.get("status", "degraded")
+                counts[status] = counts.get(status, 0) + 1
+                counts["non_arbitrable_impls"] += len(
+                    arbitration.get("non_arbitrable", [])
+                )
+                if arbitration.get("dissenters"):
+                    counts["dissent_metrics"] += 1
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id
+        if threshold is not None:
+            summary["arbitration"] = {
+                "enabled": True,
+                "threshold": threshold,
+                "strategy": strategy,
+                "default_strategy": DEFAULT_STRATEGY,
+                "selection": {
+                    "chosen": DEFAULT_STRATEGY,
+                    "active": strategy,
+                    "rationale": CHOICE_RATIONALE,
+                    "switch_point": SWITCH_POINT,
+                    "alternatives": dict(ALTERNATIVES),
+                },
+                **summary.get("arbitration", {}),
+            }
         finish_run(conn, run_id, status="completed", summary=summary)
         log_audit(conn, "run.completed", f"run:{run_id}", "ok", summary)
         return run_id

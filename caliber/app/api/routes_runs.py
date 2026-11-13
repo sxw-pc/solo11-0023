@@ -7,6 +7,7 @@ from typing import Any
 from flask import Blueprint, current_app, g, jsonify, request
 
 from ..core.dataset_loader import load_catalog
+from ..core.arbitration import DEFAULT_CONSENSUS_THRESHOLD
 from ..core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
 from ..errors import CaliberError
 
@@ -34,6 +35,42 @@ def _tolerance(payload: dict[str, Any], name: str, default: float) -> float:
     return result
 
 
+def _arbitration(payload: dict[str, Any], config: Any) -> tuple[float | None, str]:
+    """Resolve arbitration settings.
+
+    Absent or null ``arbitration`` keeps the historical behaviour: no
+    arbitration fields are produced, unless the deployment configured a
+    default threshold.  ``true`` or an object enables it and the threshold
+    defaults to ``DEFAULT_CONSENSUS_THRESHOLD``.
+    """
+    raw = payload.get("arbitration")
+    if raw is False:
+        return None, str(
+            payload.get("arbitration_strategy", config.arbitration_strategy)
+        )
+    explicit = raw is not None
+    if not explicit and config.consensus_threshold is None:
+        return None, str(config.arbitration_strategy)
+    nested = raw if isinstance(raw, dict) else {}
+    candidate = payload.get(
+        "consensus_threshold", nested.get("threshold", config.consensus_threshold)
+    )
+    if candidate is None:
+        candidate = DEFAULT_CONSENSUS_THRESHOLD
+    try:
+        threshold = float(candidate)
+    except (TypeError, ValueError) as exc:
+        raise CaliberError("consensus_threshold 必须是数值") from exc
+    if not 0.0 <= threshold <= 1.0:
+        raise CaliberError("consensus_threshold 必须在 0 到 1 之间")
+    strategy = str(
+        payload.get(
+            "arbitration_strategy", nested.get("strategy", config.arbitration_strategy)
+        )
+    )
+    return threshold, strategy
+
+
 @bp.post("")
 def create_run():
     payload = request.get_json(silent=True)
@@ -44,6 +81,7 @@ def create_run():
     config = current_app.config["CALIBER"]
     keys = _metric_keys(payload)
     datasets_dir = Path(payload.get("datasets_dir") or config.datasets_dir).expanduser().resolve()
+    threshold, strategy = _arbitration(payload, config)
     catalog = load_catalog(datasets_dir)
     try:
         run_id = perform_run(
@@ -56,6 +94,8 @@ def create_run():
             max_rows=config.max_result_rows,
             abs_tolerance=_tolerance(payload, "abs", config.abs_tolerance),
             rel_tolerance=_tolerance(payload, "rel", config.rel_tolerance),
+            consensus_threshold=threshold,
+            arbitration_strategy=strategy,
         )
     finally:
         catalog.close()

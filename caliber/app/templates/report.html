@@ -69,7 +69,7 @@
           <td><code>{{ diff.dimension }}</code></td>
           <td><span class="pill {{ 'inconsistent' if diff.kind == 'value_mismatch' else 'partial' }}">{{ diff.kind }}</span></td>
           {% for impl_id in item.impl_ids %}
-            <td>{% set value = diff.values.get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
+            <td>{% set value = diff["values"].get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
           {% endfor %}
           <td>{% if diff.max_delta is none %}-{% else %}{{ "%.6g" | format(diff.max_delta) }}{% endif %}</td>
         </tr>
@@ -78,6 +78,72 @@
     </table>
     {% else %}
     <p class="success-note">全部维度在容差内一致。</p>
+    {% endif %}
+    {% if item.arbitration %}
+    {% set arb = item.arbitration %}
+    <h3>跨实现仲裁
+      <span class="pill {{ 'consistent' if arb.status == 'ok' else 'partial' }}">{{ arb.status }}</span>
+    </h3>
+    <div class="report-meta">
+      <span>策略：{{ arb.strategy }}</span>
+      <span>共识阈值：{{ arb.threshold }}</span>
+      <span>共识组：{{ arb.consensus_group | join(', ') if arb.consensus_group else '未形成' }}</span>
+      {% if arb.max_divergence_detail %}
+      <span>最大分歧：{{ "%.6g" | format(arb.max_divergence_detail.delta) }}
+        （{{ arb.max_divergence_detail.left }} / {{ arb.max_divergence_detail.right }}
+        @ {{ arb.max_divergence_detail.dimension }}）</span>
+      {% endif %}
+    </div>
+    {% if arb.dissenters %}
+    <table>
+      <thead><tr><th>异议实现</th><th>异议维度</th><th>说明</th></tr></thead>
+      <tbody>
+      {% for entry in arb.dissenters %}
+        <tr>
+          <td><strong>{{ entry.impl_id }}</strong></td>
+          <td>{{ entry.dissent_dimensions | join(', ') or '-' }}</td>
+          <td>{{ entry.reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% for entry in arb.dissenters %}
+      {% if entry.dissent_details %}
+      <table>
+        <thead><tr><th>维度</th><th>类型</th><th>实现值</th><th>共识值</th><th>差值</th></tr></thead>
+        <tbody>
+        {% for row in entry.dissent_details %}
+          <tr>
+            <td><code>{{ row.dimension }}</code></td>
+            <td>{{ row.kind }}</td>
+            <td>{% if row.impl_value is none %}-{% else %}{{ "%.6g" | format(row.impl_value) }}{% endif %}</td>
+            <td>{% if row.consensus_value is none %}-{% else %}{{ "%.6g" | format(row.consensus_value) }}{% endif %}</td>
+            <td>{% if row.delta is none %}-{% else %}{{ "%.6g" | format(row.delta) }}{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    {% endfor %}
+    {% endif %}
+    {% if arb.minority %}
+    <p class="muted">共识组内轻微偏离：
+      {% for entry in arb.minority %}{{ entry.impl_id }}（{{ entry.minority_dimensions | join(', ') }}）{% if not loop.last %}；{% endif %}{% endfor %}
+    </p>
+    {% endif %}
+    {% if arb.degraded %}
+    <p class="muted">降级原因：{{ arb.degraded.reason }}{% if arb.degraded.detail %}（{{ arb.degraded.detail }}）{% endif %}</p>
+    {% endif %}
+    {% if arb.non_arbitrable %}
+    <table>
+      <thead><tr><th>不可仲裁实现</th><th>阶段</th><th>原因</th></tr></thead>
+      <tbody>
+      {% for failure in arb.non_arbitrable %}
+        <tr><td><strong>{{ failure.impl_id }}</strong></td><td>{{ failure.stage }}</td><td>{{ failure.reason }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
     {% endif %}
   </section>
   {% endfor %}

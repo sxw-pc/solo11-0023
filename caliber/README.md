@@ -127,6 +127,35 @@ SQL 约定：
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
 
+### 4.1 跨实现投票仲裁（可选）
+
+整体 verdict 只回答「这条指标是否一致」，无法区分「谁和谁一致、谁偏离」。启用仲裁后，快照 `result_json` 会多出 `arbitration` 字段，报告也会出现「跨实现仲裁」小节。
+
+**启用方式**：不配置时完全不做仲裁，快照结构与旧版一致。启用后：
+
+- CLI：`python -m app run ... --consensus-threshold 1.0 --arbitration-strategy impl_cluster`
+- API：`POST /api/runs` 请求体加 `arbitration: {threshold: 1.0, strategy: "impl_cluster"}`；或环境变量 `CALIBER_CONSENSUS_THRESHOLD`、`CALIBER_ARBITRATION_STRATEGY`（API 可用 `arbitration: false` 显式关闭）。
+- 阈值取值 `[0, 1]`，`1.0` 表示两个实现必须所有维度都一致才算同类。
+
+**策略取舍**：默认 `impl_cluster`（实现级聚类）：先两两计算维度一致率，把一致率 ≥ 阈值的实现连边，取规模唯一最大的完全子图作为共识组。它比逐维投票更稳定、复杂度为 `O(n²·d)`，不会因维度组合爆炸；为避免吞掉单维异议，仲裁仍会为每个异议方展开 `dissent_dimensions`，并把共识组内部的轻微偏离记入 `minority`。可切换的 `dimension_vote` 逐维多数投票，对局部偏差更敏感，但各维度分组需要额外聚合成实现分组。选择理由与切换点写入 `arbitration.selection`（含 `rationale`、`switch_point`、`alternatives`），并在 run 摘要中重复保存。
+
+**快照字段**（`snapshot.result.arbitration`）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `status` | `ok` 或 `degraded` |
+| `consensus_group` | 共识组 `impl_id` 列表 |
+| `dissenters` | 异议方列表，每项含 `impl_id`、`dissent_dimensions`、`dissent_details`、`max_divergence` |
+| `dissent_dimensions` | 所有异议维度的并集 |
+| `minority` | 共识组内只在部分维度偏离的成员（不吞掉单维异议） |
+| `max_divergence` / `max_divergence_detail` | 各实现之间的最大分歧值及位置 |
+| `pairwise` | 两两一致率与分歧维度明细 |
+| `non_arbitrable` | 求值失败或被拒绝的实现，含 `stage`、`code`、`reason` |
+| `impl_classification` | 每个实现的分类：`consensus` / `dissent` / `disputed` / `non_arbitrable` / `insufficient` |
+| `selection` | 策略选择理由、可切换点与备选策略 |
+
+**降级规则**：只有两个实现且互不一致时，返回 `status=degraded`、`degraded.code=two_impl_disagreement`，不硬凑共识组；所有实现两两不同意、或存在多个同等规模候选组时同理（`no_consensus` / `no_majority`）。可仲裁实现不足两个为 `insufficient_impls`，没有可仲裁实现为 `no_arbitrable_impls`。仲裁内部异常只会把该指标的仲裁标为 `arbitration_error`，原有维度比对结果保留，不会中断整批 run。求值失败或被拒绝的实现只进入 `non_arbitrable`，不参与投票、也不会被算作异议方；此时若原判定为 `consistent`，会降级为 `partial` 并在摘要标注。
+
 ## 5. 目录结构
 
 ```text
@@ -175,9 +204,12 @@ caliber/
 {
   "metrics": ["active_users", "avg_order_value"],
   "datasets_dir": "fixtures/datasets",
-  "tolerances": {"abs": 0.000001, "rel": 0}
+  "tolerances": {"abs": 0.000001, "rel": 0},
+  "arbitration": {"threshold": 1.0, "strategy": "impl_cluster"}
 }
 ```
+
+省略 `arbitration` 时不做仲裁，快照与报告保持旧结构；`arbitration: false` 可在配置了全局阈值时显式关闭。
 
 ## 7. 安全与合规
 
@@ -206,6 +238,7 @@ caliber/
 - CSV 全量加载到内存 SQLite；超大文件不适合。
 - SQL 结果契约固定为 1–2 列；多维度组合需要预先拼成一个维度列。
 - 漂移只检测相邻快照的 `consistent → inconsistent`，不检测版本定义差异引起的语义漂移。
+- 跨实现仲裁只做一次静态投票，不追踪同一实现历次运行中的立场漂移；`impl_cluster` 在超过 20 个实现时退化为贪心分组。
 - 无用户、权限、调度、告警和报告持久化文件管理。
 - 报告 HTML 是独立静态字符串，和本地页面不是同一模板系统。
 
