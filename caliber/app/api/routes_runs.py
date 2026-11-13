@@ -8,6 +8,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 
 from ..core.dataset_loader import load_catalog
 from ..core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
+from ..core.windowing import normalize_policy, normalize_size
 from ..errors import CaliberError
 
 bp = Blueprint("api_runs", __name__, url_prefix="/api/runs")
@@ -34,6 +35,20 @@ def _tolerance(payload: dict[str, Any], name: str, default: float) -> float:
     return result
 
 
+def _policy(payload: dict[str, Any], default: str) -> str:
+    nested = payload.get("window") if isinstance(payload.get("window"), dict) else {}
+    value = payload.get("window_policy", nested.get("policy", default))
+    if not isinstance(value, str):
+        raise CaliberError("window_policy 必须是字符串")
+    return normalize_policy(value)
+
+
+def _window_size(payload: dict[str, Any], default: int) -> int:
+    nested = payload.get("window") if isinstance(payload.get("window"), dict) else {}
+    value = payload.get("window_size", nested.get("size", default))
+    return normalize_size(value)
+
+
 @bp.post("")
 def create_run():
     payload = request.get_json(silent=True)
@@ -56,6 +71,8 @@ def create_run():
             max_rows=config.max_result_rows,
             abs_tolerance=_tolerance(payload, "abs", config.abs_tolerance),
             rel_tolerance=_tolerance(payload, "rel", config.rel_tolerance),
+            window_policy=_policy(payload, config.window_policy),
+            window_size=_window_size(payload, config.window_size),
         )
     finally:
         catalog.close()

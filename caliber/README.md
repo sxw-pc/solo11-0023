@@ -127,6 +127,25 @@ SQL 约定：
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
 
+### 4.1 归并窗口
+
+在既有 `runs` / `snapshots` 表之上，按**指标 key** 归并最近若干 run，派生出一个窗口视图并写回该指标最新快照的 `summary_json.window`（不新增表、不新增列）。窗口内识别四种状态：
+
+| 状态 | 含义 | 偏离起止 run |
+| --- | --- | --- |
+| `first_deviation` | 窗口锚点 run 本身就是本段偏离的第一个 run | `deviation_start_run_id` = 锚点 run |
+| `ongoing_deviation` | 窗口锚点 run 仍在偏离，但偏离始于更早的 run | `deviation_start_run_id` = 起始 run |
+| `recovered` | 窗口内出现过偏离，锚点 run 已恢复 | 起始与结束 run 均有值 |
+| `consistent` | 窗口内从未偏离 | 均为 `null` |
+
+`partial` 与 `inconsistent` 都计入偏离。窗口读写均为增量：新增快照时只读取该指标最近 `size + 1` 条记录（多读一条作为 look-back，用于区分「首次偏离」与「持续偏离」），查询走 `idx_snapshots_key(metric_key, id DESC)`，不会随其他指标数量增长而退化。
+
+**策略选择：按固定 run 数归并（`run_count`）。** 理由：run 是离散、可审计的求值事件，`run_id` 直接决定窗口边界；窗口大小恒定，增量重算只依赖最近的 K+1 条记录，同一窗口重复计算结果与写回内容完全一致。按时间跨度归并会让窗口大小随运行密度抖动，且 `created_at` 只有秒级精度，同一秒内多次运行时边界不稳定。
+
+可切换点在 `app/core/windowing.py` 的 `WINDOW_POLICIES` 注册表：新增策略只需注册一个 `(conn, metric_key, size, anchor_snapshot_id) -> rows` 采集函数，状态计算、写回与报告层不变。选定的策略、窗口大小、选择理由与切换点会写入 `runs.summary_json.window`，可通过 `python -m app run --window-policy/--window-size`、`POST /api/runs` 的 `window: {policy, size}` 或 `CALIBER_WINDOW_POLICY` / `CALIBER_WINDOW_SIZE` 调整。
+
+**旧快照降级：** 若窗口内某条快照缺少 `result_json` 的 `diffs` / `dimensions` 细项（或该列不可解析），窗口仍按 `verdict` 归并，状态与起止 run 照常给出，同时写入 `degraded: true`、`degraded_snapshot_ids` 与 `degraded_notice`，报告中显式提示；报告链不会中断。重算使用内容摘要 `digest` 判定是否需要写回，同一窗口重算两遍第二次是纯读操作，不会产生重复写回。
+
 ## 5. 目录结构
 
 ```text
@@ -167,6 +186,9 @@ caliber/
 | GET | `/api/datasets/<key>/preview` | 数据预览 |
 | POST | `/api/runs` | 触发同步比对 |
 | GET | `/api/runs` / `/api/runs/<id>` | 运行历史与快照 |
+| GET | `/api/windows` | 各指标归并窗口（`policy` / `size` / `recompute`） |
+| GET | `/api/windows/<key>` | 单个指标归并窗口 |
+| GET | `/api/windows/meta` | 窗口默认策略、选择理由与切换点 |
 | GET | `/api/reports/<run_id>?format=json\|md\|html` | 报告导出 |
 
 `POST /api/runs` 示例请求体：
@@ -206,6 +228,8 @@ caliber/
 - CSV 全量加载到内存 SQLite；超大文件不适合。
 - SQL 结果契约固定为 1–2 列；多维度组合需要预先拼成一个维度列。
 - 漂移只检测相邻快照的 `consistent → inconsistent`，不检测版本定义差异引起的语义漂移。
+- 归并窗口目前只有 `run_count` 一种策略；时间跨度策略留有注册点但未实现。
+- 窗口块只写回指标最新快照的 `summary_json`，更早快照上的窗口是读取时按需派生的。
 - 无用户、权限、调度、告警和报告持久化文件管理。
 - 报告 HTML 是独立静态字符串，和本地页面不是同一模板系统。
 

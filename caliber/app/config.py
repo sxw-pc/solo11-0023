@@ -27,6 +27,8 @@ class Config:
     max_result_rows: int = 10_000
     abs_tolerance: float = 1e-6
     rel_tolerance: float = 0.0
+    window_policy: str = "run_count"
+    window_size: int = 5
     testing: bool = False
 
     @classmethod
@@ -46,6 +48,8 @@ class Config:
             sql_roots=(fixtures / "impls",),
             host=host,
             port=int(os.environ.get("CALIBER_PORT", "5057")),
+            window_policy=os.environ.get("CALIBER_WINDOW_POLICY", "run_count"),
+            window_size=int(os.environ.get("CALIBER_WINDOW_SIZE", "5")),
         )
 
     def ensure_dirs(self) -> None:

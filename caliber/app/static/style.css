@@ -131,3 +131,18 @@ td small { display:block; color:var(--muted); }
   .panel { padding:16px 14px; overflow-x:auto; }
   table { min-width:640px; }
 }
+
+/*
+ * Merge-window states reuse the shared palette; no new colors are introduced.
+ * first/ongoing deviation: danger, recovered: success, consistent: neutral.
+ */
+.pill.first_deviation, .pill.ongoing_deviation { background:var(--red-soft); color:var(--red); }
+.pill.recovered { background:var(--green-soft); color:var(--green); }
+.pill.consistent { background:var(--green-soft); color:var(--green); }
+.warning-note { background:var(--amber-soft); color:var(--amber); border-radius:8px;
+  padding:10px 13px; font-size:13px; margin:12px 0 0; }
+.window-cell-muted { color:var(--muted); }
+
+/* On the report page the window table must stay readable on narrow screens. */
+.report-stats { grid-template-columns:repeat(6,1fr); }
+@media (max-width:840px) { .report-stats { grid-template-columns:repeat(3,1fr); } }

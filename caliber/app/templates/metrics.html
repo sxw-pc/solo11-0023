@@ -64,14 +64,22 @@
     <div class="panel-head"><h2>最近口径快照</h2><a href="/runs">运行比对 →</a></div>
     {% if snapshots %}
     <table>
-      <thead><tr><th>快照</th><th>运行</th><th>版本</th><th>判定</th><th>差异</th><th>时间</th><th></th></tr></thead>
+      <thead><tr><th>快照</th><th>运行</th><th>版本</th><th>判定</th><th>窗口状态</th><th>差异</th><th>时间</th><th></th></tr></thead>
       <tbody>
       {% for snap in snapshots %}
+        {% set window = snap.summary.get('window') %}
         <tr>
           <td>#{{ snap.id }}</td>
           <td>#{{ snap.run_id }}</td>
           <td>v{{ snap.metric_version }}</td>
           <td><span class="pill {{ snap.verdict }}">{{ snap.verdict }}</span></td>
+          <td>
+            {% if window %}
+              <span class="pill {{ window.status }}">{{ window.status_label }}</span>
+              {% if window.degraded %}<span class="pill partial" title="{{ window.degraded_notice }}">降级</span>{% endif %}
+              <small>run {{ window.window_start_run_id }} → {{ window.window_end_run_id }}</small>
+            {% else %}<span class="muted">-</span>{% endif %}
+          </td>
           <td>{{ snap.summary.diff_count }} 个维度</td>
           <td class="muted">{{ snap.created_at }}</td>
           <td><a class="quiet" href="/reports/{{ snap.run_id }}">报告</a></td>

@@ -59,6 +59,7 @@ def test_import_run_and_report_end_to_end(
     output = capsys.readouterr().out
     assert "# 指标准星一致性报告" in output
     assert "avg_order_value" in output
+    assert "## 归并窗口" in output
 
     output_path = tmp_path / "report.json"
     code = main(
@@ -88,3 +89,41 @@ def test_cli_run_unknown_metric_returns_nonzero(
     assert code == 1
     assert "指标不存在" in capsys.readouterr().err
 
+
+def test_cli_window_flags_and_metadata(tmp_path: Path, fixture_tree: Path, capsys):
+    db_path = tmp_path / "cli-window.db"
+    prefix = base_args(db_path, fixture_tree)
+    assert main(prefix + ["import-metrics", "--dir", str(fixture_tree / "metrics")]) == 0
+    capsys.readouterr()
+
+    code = main(
+        prefix
+        + [
+            "run",
+            "--metrics", "avg_order_value",
+            "--datasets", str(fixture_tree / "datasets"),
+            "--window-policy", "run_count",
+            "--window-size", "2",
+        ]
+    )
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "窗口[首次偏离]" in output
+
+    code = main(prefix + ["report", "--last", "--format", "json"])
+    assert code == 0
+    output = capsys.readouterr().out
+    assert '"policy": "run_count"' in output
+    assert '"size": 2' in output
+
+    code = main(
+        prefix
+        + [
+            "run",
+            "--metrics", "avg_order_value",
+            "--datasets", str(fixture_tree / "datasets"),
+            "--window-policy", "time_span",
+        ]
+    )
+    assert code == 1
+    assert "WINDOW_POLICIES" in capsys.readouterr().err

@@ -144,3 +144,71 @@ def test_web_pages_are_local_and_render(imported_client, app_config):
 
     assert imported_client.get("/metrics/missing").status_code == 404
     assert imported_client.get("/reports/999").status_code == 404
+
+
+def test_window_api_exposes_policy_and_incremental_recompute(imported_client, app_config):
+    created = imported_client.post(
+        "/api/runs",
+        json={
+            "metrics": ["active_users", "avg_order_value"],
+            "datasets_dir": str(app_config.datasets_dir),
+            "window": {"size": 3},
+        },
+    )
+    assert created.status_code == 201
+    payload = created.get_json()
+    assert payload["run"]["summary"]["window"]["size"] == 3
+    avg = next(
+        item for item in payload["snapshots"] if item["metric_key"] == "avg_order_value"
+    )
+    assert avg["summary"]["window"]["status"] == "first_deviation"
+    assert avg["summary"]["window"]["deviation_start_run_id"] == payload["run"]["id"]
+
+    meta = imported_client.get("/api/windows/meta")
+    assert meta.status_code == 200
+    body = meta.get_json()
+    assert body["default"]["policy"] == "run_count"
+    assert body["default"]["selection_reason"]
+    assert body["policies"] == ["run_count"]
+
+    listing = imported_client.get("/api/windows?size=3")
+    assert listing.status_code == 200
+    data = listing.get_json()
+    assert data["count"] == 2
+    assert {item["status"] for item in data["windows"]} == {
+        "consistent", "first_deviation"
+    }
+
+    recompute = imported_client.get("/api/windows/active_users?size=3&recompute=true")
+    assert recompute.status_code == 200
+    assert recompute.get_json()["window"]["changed"] is False
+
+    detail = imported_client.get("/api/windows/avg_order_value?size=3")
+    assert detail.get_json()["window"]["source"] == "snapshot"
+    assert imported_client.get("/api/windows/unknown_metric").status_code == 404
+
+    bad = imported_client.get("/api/windows?policy=time_span")
+    assert bad.status_code == 400
+    assert "WINDOW_POLICIES" in bad.get_json()["message"]
+    assert imported_client.get("/api/windows?size=0").status_code == 400
+    assert imported_client.get("/api/windows?recompute=maybe").status_code == 400
+
+
+def test_window_report_endpoint_includes_window_block(imported_client, app_config):
+    created = imported_client.post(
+        "/api/runs",
+        json={"metrics": ["active_users"], "datasets_dir": str(app_config.datasets_dir)},
+    )
+    run_id = created.get_json()["run"]["id"]
+    response = imported_client.get(f"/api/reports/{run_id}?format=json")
+    report = json.loads(response.get_data(as_text=True))
+    assert report["window_policy"]["policy"] == "run_count"
+    assert len(report["windows"]) == 1
+    assert report["windows"][0]["metric_key"] == "active_users"
+    assert report["windows"][0]["status"] == "consistent"
+    assert report["summary"]["window_count"] == 1
+    assert report["summary"]["window_consistent"] == 1
+
+    page = imported_client.get(f"/reports/{run_id}")
+    assert page.status_code == 200
+    assert "归并窗口" in page.get_data(as_text=True)

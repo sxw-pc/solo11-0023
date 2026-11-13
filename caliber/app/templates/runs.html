@@ -73,6 +73,7 @@
           <td>
             {% for snap in run.snapshots %}
               <span class="pill {{ snap.verdict }}">{{ snap.metric_key }}: {{ snap.verdict }}</span>
+              {% if snap.window %}<span class="pill {{ snap.window.status }}" title="窗口 {{ snap.window.window_start_run_id }} → {{ snap.window.window_end_run_id }}">{{ snap.window.status_label }}</span>{% endif %}
             {% endfor %}
             {% if not run.snapshots %}<span class="muted">-</span>{% endif %}
           </td>

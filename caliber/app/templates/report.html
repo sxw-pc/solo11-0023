@@ -34,6 +34,47 @@
     <div class="stat bad"><span class="num">{{ report.summary.inconsistent }}</span><span>inconsistent</span></div>
     <div class="stat warn"><span class="num">{{ report.summary.partial }}</span><span>partial</span></div>
     <div class="stat"><span class="num">{{ report.summary.drift_count }}</span><span>漂移事件</span></div>
+    <div class="stat"><span class="num">{{ report.summary.window_count }}</span><span>归并窗口</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>归并窗口</h2>
+      <span class="muted">策略 {{ report.window_policy.policy }} · {{ report.window_policy.size }} 个 run</span>
+    </div>
+    <p class="hint">{{ report.window_policy.selection_reason }}</p>
+    {% if report.windows %}
+    <table>
+      <thead>
+        <tr><th>指标</th><th>窗口状态</th><th>窗口 run 范围</th><th>偏离开始 run</th><th>偏离结束 run</th><th>窗口内判定</th><th>明细</th></tr>
+      </thead>
+      <tbody>
+      {% for window in report.windows %}
+        <tr>
+          <td><code>{{ window.metric_key }}</code></td>
+          <td><span class="pill {{ window.status }}">{{ window.status_label }}</span></td>
+          <td>{{ window.window_start_run_id }} → {{ window.window_end_run_id }}</td>
+          <td>
+            {% if window.deviation_start_run_id is not none %}#{{ window.deviation_start_run_id }}
+            {% elif window.deviation_start_before_window %}<span class="muted">窗口前已偏离</span>
+            {% else %}-{% endif %}
+          </td>
+          <td>{% if window.deviation_end_run_id is not none %}#{{ window.deviation_end_run_id }}{% else %}-{% endif %}</td>
+          <td>{{ window.consistent_count }} 一致 / {{ window.deviation_count }} 偏离</td>
+          <td>{% if window.degraded %}<span class="pill partial">降级</span>{% else %}完整{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% set degraded_windows = report.windows | selectattr('degraded') | list %}
+    {% if degraded_windows %}
+    <p class="warning-note">{{ degraded_windows[0].degraded_notice }}
+      {% for window in degraded_windows %}<br><code>{{ window.metric_key }}</code>：快照 {% for id in window.degraded_snapshot_ids %}#{{ id }} {% endfor %}{% endfor %}
+    </p>
+    {% endif %}
+    {% else %}
+    <div class="empty"><p>本次运行没有可归并的窗口。</p></div>
+    {% endif %}
   </section>
 
   {% for item in report.metrics %}

@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--datasets", type=Path, help="CSV 数据集目录")
     run.add_argument("--abs-tol", type=float, default=None, help="绝对容差")
     run.add_argument("--rel-tol", type=float, default=None, help="相对容差")
+    run.add_argument("--window-policy", default=None,
+                     help="归并窗口策略，当前仅支持 run_count")
+    run.add_argument("--window-size", type=int, default=None,
+                     help="归并窗口大小（run 数），默认 5")
     run.set_defaults(handler=_run)
 
     report = sub.add_parser("report", help="导出比对报告")
@@ -103,6 +107,8 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
             max_rows=config.max_result_rows,
             abs_tolerance=config.abs_tolerance if args.abs_tol is None else args.abs_tol,
             rel_tolerance=config.rel_tolerance if args.rel_tol is None else args.rel_tol,
+            window_policy=config.window_policy if args.window_policy is None else args.window_policy,
+            window_size=config.window_size if args.window_size is None else args.window_size,
         )
     finally:
         catalog.close()
@@ -110,6 +116,12 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
     print(f"运行 #{run_id} 完成：{json.dumps(run['summary'], ensure_ascii=False)}")
     for snapshot in snapshots_for_run(conn, run_id):
         print(f"- {snapshot['metric_key']} v{snapshot['metric_version']}: {snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})")
+        window = snapshot["summary"].get("window")
+        if window:
+            print(f"  窗口[{window['status_label']}] run {window['window_start_run_id']}"
+                  f"→{window['window_end_run_id']}，偏离开始 {window['deviation_start_run_id']}"
+                  f"，结束 {window['deviation_end_run_id']}"
+                  + ("（明细降级：仅按 verdict 归并）" if window["degraded"] else ""))
     print(f"导出报告: python -m app report --run-id {run_id} --format md")
     return 0
 
