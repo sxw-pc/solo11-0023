@@ -13,6 +13,7 @@ from app.config import Config
 from app.core.dataset_loader import load_catalog
 from app.core.registry import MetricRegistry
 from app.core.reporter import build_report, export_report
+from app.core import retention
 from app.core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
 from app.db import init_db
 from app.errors import CaliberError
@@ -46,6 +47,18 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--format", choices=("json", "md", "html"), default="md")
     report.add_argument("--output", type=Path, help="输出文件；省略则打印到标准输出")
     report.set_defaults(handler=_report)
+
+    prune = sub.add_parser("prune", help="按本地留存窗口裁剪运行、快照与审计记录")
+    prune.add_argument(
+        "--retention-days",
+        type=int,
+        default=None,
+        help="保留窗口（天，正整数）；省略时读取 CALIBER_RETENTION_DAYS，未配置则不裁剪",
+    )
+    prune.add_argument("--dry-run", action="store_true", help="只统计将删除的数据，不执行删除")
+    prune.add_argument("--batch-size", type=int, default=None, help="每批提交的运行数（默认 200）")
+    prune.add_argument("--yes", action="store_true", help="跳过交互确认（脚本/非 TTY 场景必需）")
+    prune.set_defaults(handler=_prune)
     return parser
 
 
@@ -133,6 +146,83 @@ def _report(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) 
         sys.stdout.write(content)
         if not content.endswith("\n"):
             sys.stdout.write("\n")
+    return 0
+
+
+def _prune(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
+    days = args.retention_days
+    if days is None:
+        days = config.retention_days
+    if days is None:
+        raise CaliberError(
+            "未配置保留窗口：请传入 --retention-days，或设置 CALIBER_RETENTION_DAYS；"
+            "默认行为是不裁剪，数据保持不变"
+        )
+    days = retention.validate_retention_days(days)
+    batch_size = retention.validate_batch_size(
+        args.batch_size if args.batch_size is not None else config.prune_batch_size
+    )
+
+    if args.dry_run:
+        stats = retention.plan_pruning(conn, days, batch_size=batch_size)
+        print(f"[dry-run] 保留窗口 {days} 天，裁剪起点（UTC）：{stats.cutoff}")
+        print(f"符合条件的运行：{stats.eligible_runs} 条")
+        print(f"将删除快照：{stats.snapshots} 条")
+        print(f"将删除关联运行审计记录：{stats.run_audit_records} 条")
+        print(f"将删除超期非运行审计记录：{stats.aged_audit_records} 条")
+        print(f"预计提交批次：{stats.batches} 个")
+        if stats.pruned_run_ids:
+            print(f"涉及运行 ID：{', '.join(str(item) for item in stats.pruned_run_ids)}")
+        print("dry-run 未删除任何数据。")
+        return 0
+
+    plan = retention.plan_pruning(conn, days, batch_size=batch_size)
+    print(f"保留窗口 {days} 天，裁剪起点（UTC）：{plan.cutoff}")
+    print(
+        f"预计删除运行 {plan.eligible_runs} 条、快照 {plan.snapshots} 条、"
+        f"审计记录 {plan.audit_records} 条，分 {plan.batches} 批提交。"
+    )
+    if plan.eligible_runs == 0 and plan.aged_audit_records == 0:
+        print("没有超过保留窗口的数据，无需裁剪。")
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise CaliberError("非交互环境执行实际裁剪必须显式传入 --yes")
+        answer = input("确认删除以上数据？输入 yes 继续：").strip().lower()
+        if answer != "yes":
+            print("已取消。", file=sys.stderr)
+            return 1
+
+    def _progress(stats: retention.PruneStats) -> None:
+        print(
+            f"  已提交批次 {stats.batches}：运行 {len(stats.pruned_run_ids)} / "
+            f"{plan.eligible_runs}，快照 {stats.snapshots}，"
+            f"审计 {stats.audit_records}",
+            flush=True,
+        )
+
+    stats = retention.prune(conn, days, batch_size=batch_size, progress=_progress)
+    log_audit(
+        conn,
+        "retention.prune",
+        "retention",
+        "ok",
+        {
+            "retention_days": days,
+            "cutoff": stats.cutoff,
+            "runs": len(stats.pruned_run_ids),
+            "snapshots": stats.snapshots,
+            "audit_records": stats.audit_records,
+            "batches": stats.batches,
+            "run_ids": stats.pruned_run_ids,
+            "via": "cli",
+        },
+    )
+    print(
+        f"裁剪完成：删除运行 {len(stats.pruned_run_ids)} 条、快照 {stats.snapshots} 条、"
+        f"审计记录 {stats.audit_records} 条（其中超期非运行审计 "
+        f"{stats.aged_audit_records} 条），共 {stats.batches} 个批次。"
+    )
     return 0
 
 

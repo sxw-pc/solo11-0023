@@ -27,6 +27,8 @@ class Config:
     max_result_rows: int = 10_000
     abs_tolerance: float = 1e-6
     rel_tolerance: float = 0.0
+    retention_days: int | None = None
+    prune_batch_size: int = 200
     testing: bool = False
 
     @classmethod
@@ -37,6 +39,24 @@ class Config:
         host = os.environ.get("CALIBER_HOST", "127.0.0.1")
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("CALIBER_HOST 只允许回环地址")
+        retention_raw = os.environ.get("CALIBER_RETENTION_DAYS", "").strip()
+        retention_days: int | None = None
+        if retention_raw:
+            try:
+                retention_days = int(retention_raw)
+            except ValueError as exc:
+                raise ValueError("CALIBER_RETENTION_DAYS 必须是正整数") from exc
+            if retention_days < 1:
+                raise ValueError(
+                    "CALIBER_RETENTION_DAYS 必须是正整数；不裁剪请取消设置"
+                )
+        batch_raw = os.environ.get("CALIBER_PRUNE_BATCH_SIZE", "200")
+        try:
+            prune_batch_size = int(batch_raw)
+        except ValueError as exc:
+            raise ValueError("CALIBER_PRUNE_BATCH_SIZE 必须是正整数") from exc
+        if prune_batch_size < 1:
+            raise ValueError("CALIBER_PRUNE_BATCH_SIZE 必须是正整数")
         return cls(
             data_dir=data_dir,
             db_path=Path(os.environ.get("CALIBER_DB", data_dir / "caliber.sqlite3")),
@@ -46,6 +66,8 @@ class Config:
             sql_roots=(fixtures / "impls",),
             host=host,
             port=int(os.environ.get("CALIBER_PORT", "5057")),
+            retention_days=retention_days,
+            prune_batch_size=prune_batch_size,
         )
 
     def ensure_dirs(self) -> None:

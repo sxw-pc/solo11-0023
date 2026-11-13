@@ -67,6 +67,8 @@ CREATE INDEX IF NOT EXISTS idx_versions_key ON metric_versions(metric_key, versi
 CREATE INDEX IF NOT EXISTS idx_snapshots_key ON snapshots(metric_key, id DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_run ON snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_finished ON runs(status, finished_at);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, created_at);
 """
 
 

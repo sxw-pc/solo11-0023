@@ -9,6 +9,7 @@ from flask import Flask, g, jsonify, render_template, request
 from .api.routes_datasets import bp as datasets_bp
 from .api.routes_metrics import bp as metrics_bp
 from .api.routes_reports import bp as reports_bp
+from .api.routes_retention import bp as retention_bp
 from .api.routes_runs import bp as runs_bp
 from .audit import record_error
 from .config import Config
@@ -17,7 +18,7 @@ from .core.dataset_loader import load_catalog
 from .core.reporter import build_report
 from .core.snapshot import list_runs, list_snapshots, snapshots_for_run
 from .db import connect, init_db, table_counts
-from .errors import CaliberError
+from .errors import CaliberError, NotFoundError
 from .models import utc_now
 
 
@@ -29,7 +30,7 @@ def create_app(config: Config | None = None) -> Flask:
     app = Flask(__name__)
     app.config["CALIBER"] = cfg
     app.json.ensure_ascii = False
-    for blueprint in (metrics_bp, runs_bp, datasets_bp, reports_bp):
+    for blueprint in (metrics_bp, runs_bp, datasets_bp, reports_bp, retention_bp):
         app.register_blueprint(blueprint)
 
     def get_db() -> sqlite3.Connection:
@@ -100,7 +101,25 @@ def create_app(config: Config | None = None) -> Flask:
 
     @app.get("/reports/<int:run_id>")
     def report_page(run_id: int):
-        return render_template("report.html", report=build_report(g.db, run_id))
+        try:
+            return render_template("report.html", report=build_report(g.db, run_id))
+        except NotFoundError:
+            return (
+                render_template(
+                    "report_missing.html",
+                    run_id=run_id,
+                    retention_days=cfg.retention_days,
+                ),
+                404,
+            )
+
+    @app.get("/retention")
+    def retention_page():
+        return render_template(
+            "retention.html",
+            retention_days=cfg.retention_days,
+            batch_size=cfg.prune_batch_size,
+        )
 
     def wants_json() -> bool:
         return request.path.startswith("/api/") or request.args.get("format") == "json"

@@ -142,11 +142,11 @@ caliber/
 │   ├── models.py            # 数据类型
 │   ├── errors.py            # 领域异常
 │   ├── audit.py             # 审计日志
-│   ├── api/                 # 指标、运行、数据集、报告 API
-│   ├── core/                # DSL、校验、仓库、求值、比对、快照、报告
+│   ├── api/                 # 指标、运行、数据集、报告、留存裁剪 API
+│   ├── core/                # DSL、校验、仓库、求值、比对、快照、报告、留存裁剪
 │   ├── templates/           # 本地 Jinja 页面
 │   └── static/              # 原生 CSS/JS，无外部依赖
-├── cli/main.py              # serve / import-metrics / run / report
+├── cli/main.py              # serve / import-metrics / run / report / prune
 ├── fixtures/
 │   ├── datasets/            # 合成 CSV
 │   ├── metrics/             # 合成 YAML 指标
@@ -168,6 +168,8 @@ caliber/
 | POST | `/api/runs` | 触发同步比对 |
 | GET | `/api/runs` / `/api/runs/<id>` | 运行历史与快照 |
 | GET | `/api/reports/<run_id>?format=json\|md\|html` | 报告导出 |
+| POST | `/api/retention/plan` | 留存裁剪 dry-run：只统计不删除 |
+| POST | `/api/retention/prune` | 按保留窗口实际分批裁剪 |
 
 `POST /api/runs` 示例请求体：
 
@@ -179,13 +181,54 @@ caliber/
 }
 ```
 
+### 6.1 本地留存周期裁剪
+
+工作台默认**只追加、不删除**：不配置保留窗口时，裁剪能力处于关闭状态，行为与历史版本完全一致。只有显式提供正整数保留窗口（天）时，才会清理超过窗口的运行、快照与审计记录。
+
+裁剪以**运行完成时间** `runs.finished_at` 为主时钟，审计记录按自身 `audit_log.created_at` 判定：
+
+- 仅 `completed` / `failed` 且 `finished_at < 裁剪起点` 的运行可被清理；`running` 等未结束运行一律保留。
+- 裁剪起点在扫描前固定为「当前 UTC 时间 − 保留窗口」，整个过程不再随时间漂移。
+- 每个批次在单个事务内严格按 **快照 → 关联审计记录 → 运行** 的顺序删除，提交前对外不可见；提交后通过引用完整性校验，确保不存在指向已删运行的孤儿快照或审计记录。
+- 关联审计记录按 `entity` 关联清理：匹配 `run:<id>` 与 `run:<id>:...`；不引用任何运行的审计记录（如 `metric.import`、CLI 错误）按其自身时间超期清理。
+- 分批独立提交（默认每批 200 个运行），避免单个长事务长时间锁住整个 SQLite 库；单批失败只回滚该批，已提交批次保持有效，可安全重跑。
+- 支持 dry-run：只统计将删除的运行、快照、审计数量与批次数，不写任何数据。建议先 dry-run 核对，再实际裁剪。
+
+**并发安全（保守策略）**：裁剪进行中若有新运行写入或某运行状态变化，不会误删。SQLite 以库级写锁串行化所有写入、写事务开启时即固定快照；每批在写事务内重新校验状态、`finished_at` 与 `started_at`，且运行的 `DELETE` 语句本身携带完整资格谓词。若某运行在读检查与写事务之间的极短窗口内被并发改写，该 `DELETE` 匹配 0 行，整批回滚并以新快照重试（有次数上限，持续冲突返回 `retention_busy` 而非强删）。因此一个刚提交的新运行，其时间戳晚于固定裁剪起点，任何情况下都不会进入删除集合。
+
+入口有三种：
+
+```bash
+# CLI：先 dry-run，确认后加 --yes 实际裁剪（非交互环境必须显式 --yes）
+python -m app prune --retention-days 90 --dry-run
+python -m app prune --retention-days 90 --batch-size 200 --yes
+```
+
+```json
+// HTTP API，请求体传 retention_days；不传时回退到 CALIBER_RETENTION_DAYS
+POST /api/retention/plan   { "retention_days": 90 }
+POST /api/retention/prune  { "retention_days": 90, "batch_size": 200 }
+```
+
+本地页面 `/retention` 提供同能力的表单（含二次确认）。被裁剪运行的报告页 `/reports/<id>` 不会返回 500，而是渲染友好的 404 提示页，说明该运行可能已按保留策略删除；对应 JSON 接口仍返回结构化 `not_found`。
+
+相关环境变量：
+
+| 变量 | 说明 | 默认 |
+| --- | --- | --- |
+| `CALIBER_RETENTION_DAYS` | 保留窗口（天，正整数）；不设置即不裁剪 | 未设置（关闭） |
+| `CALIBER_PRUNE_BATCH_SIZE` | 每批提交的运行数 | `200` |
+
+裁剪完成后会写一条 `retention.prune` 审计记录（dry-run 不写）。注意删除本身不会缩小 SQLite 文件体积，如需回收磁盘空间可在裁剪后手动执行 `VACUUM`（工作台不自动执行，避免额外的库级锁）。
+
+
 ## 7. 安全与合规
 
 - **只读 SQL**：语句白名单只允许 `SELECT` / `WITH`；显式拒绝写入、DDL、ATTACH、PRAGMA、事务控制等关键字，并拒绝多语句。求值连接设置 `PRAGMA query_only = ON`，每次查询在事务中执行后回滚。违规语句抛出 `unsafe_sql`，测试覆盖写操作和 ATTACH。
 - **路径白名单**：`sql_file` 只能相对受信任 SQL 目录解析。绝对路径、`..`、锚点路径以及逃逸出根目录的解析结果均被拒绝。
 - **仅本机**：默认且只允许监听 `127.0.0.1`（或同义回环地址）；无鉴权，因为定位是单机工作台。
 - **完全离线**：运行期不发起网络请求。模板不引用 CDN、远程字体、遥测或外部 API。
-- **审计**：导入、运行、失败与报告导出写入本地 `audit_log`；异常由 CLI/HTTP 边界统一捕获，不静默失败。
+- **审计**：导入、运行、失败、报告导出与留存裁剪写入本地 `audit_log`；异常由 CLI/HTTP 边界统一捕获，不静默失败。
 - **无真实敏感信息**：仓库没有真实密钥、令牌、公司名、真实域名或真实 IP。
 
 ## 8. 数据与 fixture 声明

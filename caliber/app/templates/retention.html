@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>留存裁剪 · 指标准星</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><span class="mark">◎</span> 指标准星</a>
+  <nav>
+    <a href="/">总览</a> <a href="/metrics">指标仓库</a> <a href="/runs">比对运行</a> <a class="active" href="/retention">留存裁剪</a>
+  </nav>
+  <span class="local-badge">仅本机</span>
+</header>
+
+<main class="page">
+  <section class="detail-head compact">
+    <div>
+      <p class="eyebrow">LOCAL RETENTION</p>
+      <h1>本地留存周期裁剪</h1>
+      <p class="lede">
+        按运行完成时间清理超过保留窗口的运行、快照及其关联审计记录。
+        默认不裁剪；只有显式提供保留窗口时才会删除数据。建议先执行 dry-run 核对统计。
+      </p>
+    </div>
+  </section>
+
+  <section class="panel run-panel">
+    <div class="panel-head">
+      <h2>裁剪参数</h2>
+      <span class="muted">
+        配置默认值：
+        {% if retention_days %}保留 {{ retention_days }} 天{% else %}未启用（不裁剪）{% endif %}
+        · 批大小 {{ batch_size }}
+      </span>
+    </div>
+    <form id="retention-form" class="run-form">
+      <div class="form-row">
+        <label>保留窗口（天，正整数）
+          <input type="number" name="retention_days" min="1" step="1"
+                 value="{{ retention_days if retention_days else '' }}"
+                 placeholder="{% if retention_days %}{{ retention_days }}{% else %}例如 90{% endif %}">
+        </label>
+        <label>批大小（可选）
+          <input type="number" name="batch_size" min="1" step="1" value="{{ batch_size }}">
+        </label>
+      </div>
+      <p class="form-note">
+        删除顺序：每个批次内先删快照，再按 entity 删关联审计记录，最后删运行；每批独立提交，避免长事务锁库。
+        进行中的运行不受影响——仅清理已完成或已失败、且完成时间与开始时间都早于裁剪起点的运行。
+      </p>
+      <div class="form-row">
+        <button class="button" type="submit" data-action="plan">Dry-run 只统计不删</button>
+        <button class="button primary" type="submit" data-action="prune">执行裁剪（不可恢复）</button>
+      </div>
+      <div id="retention-message" class="message" role="status" aria-live="polite"></div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>执行结果</h2><span id="result-mode" class="muted">尚未执行</span></div>
+    <div id="retention-result" class="empty"><p>填写保留窗口后先跑一次 dry-run，确认统计数字再实际裁剪。</p></div>
+  </section>
+</main>
+<footer class="footer">指标准星 · 分批提交 · 引用完整性校验 · 仅本机</footer>
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("retention-form");
+  var message = document.getElementById("retention-message");
+  var result = document.getElementById("retention-result");
+  var resultMode = document.getElementById("result-mode");
+
+  function show(text, kind) {
+    message.textContent = text;
+    message.className = "message " + kind;
+  }
+
+  function positiveInt(value) {
+    var n = Number(value);
+    return Number.isInteger(n) && n >= 1 ? n : null;
+  }
+
+  function renderStats(body, dryRun) {
+    var plan = body.plan || body.result;
+    resultMode.textContent = dryRun ? "dry-run（未删除任何数据）" : "实际裁剪完成";
+    var rows = [
+      ["裁剪起点 (UTC)", plan.cutoff],
+      ["符合条件的运行", plan.eligible_runs],
+      ["将删除 / 已删除快照", plan.snapshots],
+      ["关联运行的审计记录", plan.run_audit_records],
+      ["超期非运行审计记录", plan.aged_audit_records],
+      ["审计记录合计", plan.audit_records],
+      ["提交批次数", plan.batches]
+    ];
+    var html = '<table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>';
+    rows.forEach(function (row) {
+      html += "<tr><td>" + row[0] + "</td><td><strong>" + row[1] + "</strong></td></tr>";
+    });
+    html += "</tbody></table>";
+    if (plan.pruned_run_ids && plan.pruned_run_ids.length) {
+      html += '<p class="hint">运行 ID：<code>' +
+        plan.pruned_run_ids.join(", ") + "</code></p>";
+    }
+    result.innerHTML = html;
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    var action = event.submitter ? event.submitter.dataset.action : "plan";
+    var days = positiveInt(form.elements.retention_days.value);
+    if (days === null) {
+      show("请填写不小于 1 的保留窗口（天）；不裁剪时无需使用本页面。", "error");
+      return;
+    }
+    var batch = positiveInt(form.elements.batch_size.value) || {{ batch_size }};
+    if (action === "prune" &&
+        !window.confirm("确认按 " + days + " 天保留窗口实际删除？此操作不可恢复。")) {
+      show("已取消裁剪。", "ok");
+      return;
+    }
+    var buttons = form.querySelectorAll("button");
+    buttons.forEach(function (btn) { btn.disabled = true; });
+    show(action === "plan" ? "正在统计可裁剪数据…" : "正在分批裁剪，请勿关闭页面…", "ok");
+    fetch(action === "plan" ? "/api/retention/plan" : "/api/retention/prune", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ retention_days: days, batch_size: batch })
+    })
+      .then(function (response) {
+        return response.json().then(function (body) {
+          return { ok: response.ok, body: body };
+        });
+      })
+      .then(function (r) {
+        if (!r.ok) {
+          throw new Error(r.body.message || "操作失败");
+        }
+        renderStats(r.body, action === "plan");
+        show(action === "plan" ? "dry-run 完成，未删除任何数据。" : "裁剪完成。", "ok");
+      })
+      .catch(function (error) {
+        show(error.message || "操作失败，请查看审计日志。", "error");
+      })
+      .finally(function () {
+        buttons.forEach(function (btn) { btn.disabled = false; });
+      });
+  });
+})();
+</script>
+</body>
+</html>

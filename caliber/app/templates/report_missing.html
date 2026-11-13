@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>报告 #{{ run_id }} 不可用 · 指标准星</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><span class="mark">◎</span> 指标准星</a>
+  <nav>
+    <a href="/">总览</a> <a href="/metrics">指标仓库</a> <a href="/runs">比对运行</a> <a href="/retention">留存裁剪</a>
+  </nav>
+  <span class="local-badge">仅本机</span>
+</header>
+
+<main class="page">
+  <section class="panel">
+    <div class="panel-head"><h2>报告不可用</h2></div>
+    <div class="empty">
+      <p>运行 <strong>#{{ run_id }}</strong> 的报告无法读取：该运行及其快照已不存在。</p>
+      {% if retention_days %}
+      <p>当前本地留存窗口为 <strong>{{ retention_days }} 天</strong>，超过窗口的运行会被留存裁剪清理。
+         这条运行很可能已按保留策略删除，而非系统错误。</p>
+      <p><a class="quiet" href="/retention">查看留存裁剪设置 →</a></p>
+      {% else %}
+      <p>当前未启用留存裁剪（默认不删除任何数据）。该运行可能从未创建，或已被手动清理。</p>
+      {% endif %}
+      <p>仍保留的运行可在「比对运行」页面查看。</p>
+      <p><a class="button" href="/runs">返回比对运行</a> <a class="button" href="/">返回首页</a></p>
+    </div>
+  </section>
+</main>
+<footer class="footer">指标准星 · 报告读取不会因已裁剪运行而失败</footer>
+</body>
+</html>
