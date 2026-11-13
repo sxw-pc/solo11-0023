@@ -31,7 +31,20 @@ def build_parser() -> argparse.ArgumentParser:
     imp = sub.add_parser("import-metrics", help="导入指标 YAML")
     imp.add_argument("--dir", type=Path, required=True, help="指标 YAML 目录")
     imp.add_argument("--impls-dir", type=Path, action="append", default=[], help="额外受信任 SQL 目录，可重复")
+    imp.add_argument(
+        "--strict",
+        action="store_true",
+        help="严格模式：高风险变更（impls 缩减或 SQL 内容指纹变化）拒绝落库",
+    )
     imp.set_defaults(handler=_import_metrics)
+
+    preview = sub.add_parser(
+        "preview-metrics", help="发布前影响预览（只读，不写库）"
+    )
+    preview.add_argument("--dir", type=Path, required=True, help="指标 YAML 目录")
+    preview.add_argument("--impls-dir", type=Path, action="append", default=[], help="额外受信任 SQL 目录，可重复")
+    preview.add_argument("--json", action="store_true", help="以 JSON 输出完整预览")
+    preview.set_defaults(handler=_preview_metrics)
 
     run = sub.add_parser("run", help="执行多实现一致性比对")
     run.add_argument("--metrics", help="逗号分隔的指标 key；省略表示全部")
@@ -72,20 +85,95 @@ def _serve(args: argparse.Namespace, config: Config, _conn: sqlite3.Connection) 
     return 0
 
 
-def _import_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
-    directory = args.dir.expanduser().resolve()
+def _resolve_sql_roots(args: argparse.Namespace, config: Config, directory: Path):
     extra: list[Path] = [item.expanduser().resolve() for item in args.impls_dir]
     sibling = directory.parent / "impls"
     if sibling.is_dir():
         extra.append(sibling)
-    roots = config.merged_sql_roots(*extra)
-    summary = MetricRegistry(conn, roots).import_directory(directory)
+    return config.merged_sql_roots(*extra)
+
+
+def _print_preview_human(preview: dict) -> None:
+    key = preview.get("key") or "?"
+    if preview.get("error"):
+        print(f"  [错误] {key}: {preview['error'].get('message', '')}")
+        return
+    if not preview.get("exists"):
+        print(
+            f"  [新增] {key}: 新指标，新增 impl {', '.join(preview.get('added_impls', []))}"
+        )
+        return
+    tag = "高风险" if preview.get("high_risk") else ("有变更" if preview.get("changed") else "无变化")
+    print(
+        f"  [{tag}] {key} v{preview.get('current_version')} -> "
+        f"v{preview.get('candidate_version')}"
+    )
+    if preview.get("added_impls"):
+        print(f"    新增 impl: {', '.join(preview['added_impls'])}")
+    if preview.get("removed_impls"):
+        print(f"    移除 impl: {', '.join(preview['removed_impls'])}")
+    if preview.get("sql_fingerprint_changes"):
+        ids = ", ".join(item["impl_id"] for item in preview["sql_fingerprint_changes"])
+        print(f"    SQL 内容指纹变化: {ids}")
+    if preview.get("grain_changed"):
+        print(f"    grain 变化: {preview.get('grain_before')} -> {preview.get('grain_after')}")
+    if preview.get("unit_changed"):
+        print(f"    unit 变化: {preview.get('unit_before')} -> {preview.get('unit_after')}")
+    print(
+        f"    波及历史 run {len(preview.get('affected_run_ids', []))} 个、"
+        f"快照 {preview.get('affected_snapshot_count', 0)} 条"
+        f"（run_id={preview.get('affected_run_ids', [])}）"
+    )
+    if preview.get("risk_reasons"):
+        print(f"    高风险原因: {', '.join(preview['risk_reasons'])}")
+    if preview.get("degraded"):
+        print("    已降级为按 key 与 impl id 集合判断")
+    for warning in preview.get("warnings", []):
+        print(f"    提示: {warning}")
+
+
+def _import_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
+    directory = args.dir.expanduser().resolve()
+    roots = _resolve_sql_roots(args, config, directory)
+    registry = MetricRegistry(conn, roots, strict=bool(getattr(args, "strict", False)))
+    summary = registry.import_directory(directory)
     for item in summary.imported:
-        print(f"导入 {item.key} v{item.version}（{item.name}）")
+        line = f"导入 {item.key} v{item.version}（{item.name}）"
+        if item.preview and item.preview.get("high_risk"):
+            line += "  [预览提示:高风险 " + ",".join(item.preview.get("risk_reasons", [])) + "]"
+        elif item.preview and item.preview.get("changed"):
+            line += "  [预览提示:有变更]"
+        print(line)
     for error in summary.errors:
         print(f"失败 {error['file']}: [{error['error']}] {error['message']}", file=sys.stderr)
+    if summary.previews:
+        print("—— 发布前影响预览 ——")
+        for preview in summary.previews:
+            _print_preview_human(preview)
+        high = summary.high_risk_count
+        print(
+            f"预览：{len(summary.previews)} 个文件，高风险 {high} 个"
+            + ("（严格模式已拦截）" if high and registry.strict else "")
+        )
     print(f"完成：成功 {len(summary.imported)}，失败 {len(summary.errors)}")
     return 0 if summary.ok else 1
+
+
+def _preview_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
+    directory = args.dir.expanduser().resolve()
+    roots = _resolve_sql_roots(args, config, directory)
+    previews = MetricRegistry(conn, roots).preview_directory(directory)
+    if getattr(args, "json", False):
+        print(json.dumps(previews, ensure_ascii=False, indent=2))
+    else:
+        print(f"发布前影响预览（只读，未写库）：{directory}")
+        for preview in previews:
+            _print_preview_human(preview)
+        high = sum(1 for item in previews if item.get("high_risk"))
+        errors = sum(1 for item in previews if item.get("error"))
+        print(f"完成：预览 {len(previews)} 个文件，高风险 {high} 个，错误 {errors} 个")
+    # Read-only command: never a non-zero exit merely because changes are risky.
+    return 0
 
 
 def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:

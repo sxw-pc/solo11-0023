@@ -75,3 +75,13 @@ class ReportError(CaliberError):
 
 class RunError(CaliberError):
     code = "run_error"
+
+
+class ImpactBlockedError(CaliberError):
+    """Raised in strict import mode when a change is classified high-risk."""
+
+    code = "impact_blocked"
+    http_status = 409
+
+    def __init__(self, message: str, *, details: Any | None = None) -> None:
+        super().__init__(message, details=details, code=self.code)

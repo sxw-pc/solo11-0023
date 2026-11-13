@@ -10,6 +10,7 @@
 
 - 指标定义 DSL（YAML）与结构化校验。
 - 指标仓库：SQLite 存储、自增版本、历史读取、字段级版本差异。
+- **发布前影响预览**：导入前只读比对候选版本与当前版本（impl 增删改、SQL 内容指纹、grain/unit 变化），列出受波及的历史 run 与快照数；默认只提示不拦截，严格模式下高风险变更拒绝落库并写审计。
 - 离线数据源：目录内 CSV 加载到内存 SQLite，支持编码、表头规范化与类型推断。
 - 多实现比对：维度对齐、缺失维度识别、绝对/相对容差判定。
 - 口径快照、`consistent → inconsistent` 漂移检测、审计日志。
@@ -109,6 +110,46 @@ SQL 约定：
 
 校验器会检查 key 格式、粒度枚举、至少两个实现、实现 ID 重复、SQL 文件存在性及路径白名单。错误以字段级列表返回。
 
+## 3a. 发布前影响预览
+
+导入会把 `current_version` 直接顶到新定义，下一次 run 立即按新口径比对。为了在落库前预判影响，所有导入链路前面都挂了一道**只读**影响预览。
+
+预览对每个候选文件，基于现有 `definition_json` 与 SQL 文件读取路径（与校验、求值共用的受信任目录解析）计算与当前版本的差异：
+
+- **impl 变化**：`added_impls` / `removed_impls` / `modified_impls`（后者标注 `source`、`sql_file` 字段变化与 SQL 指纹变化）。
+- **SQL 内容指纹**：导入时对每个 SQL 文件的字节计算 `sha256` 并内嵌进该版本 `definition_json` 的 `impls[].sql_fingerprint`。历史版本因此保留不可变指纹，候选侧读当前磁盘文件指纹；只改内容不改文件名也能识别。
+- **grain / unit 变化**：单独给出 before/after 与变更标记。
+- **影响面**：从 `snapshots` 表汇总该 key 的历史 `affected_run_ids` 与 `affected_snapshot_count`。
+
+**高风险判定**（两种模式共用同一套判定，结果一致）：
+
+- `impls_shrunk`：impl id 集合缩减（存在被移除的实现）。
+- `sql_fingerprint_changed`：任一保留实现的 SQL 内容指纹变化。
+
+两种导入模式：
+
+- **普通模式（默认）**：预览只提示、不拦截，保持历史导入行为兼容；预览结果随导入 summary 一并返回。
+- **严格模式（`--strict` / `strict=True`）**：预览判定为高风险时拒绝落库，抛 `impact_blocked`（HTTP 409），写一条 `metric.import.blocked` 审计记录，`metrics` / `metric_versions` 不发生变化。
+
+**只读保证**：预览本身不写 `metric_versions`、不产生审计记录，可对只读连接调用。
+
+**老版本降级**：早期 `metric_versions` 行可能缺 `source_file` 或内嵌 `sql_fingerprint`。此时自动降级为按 key 与 impl id 集合（并在可行时回退读取当前磁盘 SQL）判断，`degraded=true` 并在 `warnings` 中逐条说明原因，不会抛错中断。
+
+入口：
+
+```bash
+# 只读预览，不写库（支持 --json 输出完整结构）
+python -m app preview-metrics --dir fixtures/metrics
+
+# 普通导入：summary 中带每个文件的预览提示
+python -m app import-metrics --dir fixtures/metrics
+
+# 严格导入：高风险变更被拦截并审计
+python -m app import-metrics --dir fixtures/metrics --strict
+```
+
+HTTP 只读预览入口：`POST /api/metrics/preview`，请求体 `{"metrics_dir": "...", "impls_dirs": [...]}`，返回每个文件的预览、`high_risk_count` 与 `high_risk_keys`，`read_only=true`。
+
 ## 4. 一致性判定规则
 
 对同一指标的每个实现，分别得到 `维度 -> 数值` 的字典，然后对所有实现的结果取维度并集逐项比较。数值相等判定为：
@@ -163,6 +204,7 @@ caliber/
 | GET | `/api/metrics/<key>/versions` | 全部历史版本 |
 | GET | `/api/metrics/<key>/versions/<n>` | 指定版本 |
 | GET | `/api/metrics/<key>/diff?from=1&to=2` | 版本字段差异 |
+| POST | `/api/metrics/preview` | 发布前影响预览（只读，不写库） |
 | GET | `/api/datasets` | 数据集元信息 |
 | GET | `/api/datasets/<key>/preview` | 数据预览 |
 | POST | `/api/runs` | 触发同步比对 |
@@ -185,7 +227,7 @@ caliber/
 - **路径白名单**：`sql_file` 只能相对受信任 SQL 目录解析。绝对路径、`..`、锚点路径以及逃逸出根目录的解析结果均被拒绝。
 - **仅本机**：默认且只允许监听 `127.0.0.1`（或同义回环地址）；无鉴权，因为定位是单机工作台。
 - **完全离线**：运行期不发起网络请求。模板不引用 CDN、远程字体、遥测或外部 API。
-- **审计**：导入、运行、失败与报告导出写入本地 `audit_log`；异常由 CLI/HTTP 边界统一捕获，不静默失败。
+- **审计**：导入、严格模式拦截（`metric.import.blocked`）、运行、失败与报告导出写入本地 `audit_log`；异常由 CLI/HTTP 边界统一捕获，不静默失败。
 - **无真实敏感信息**：仓库没有真实密钥、令牌、公司名、真实域名或真实 IP。
 
 ## 8. 数据与 fixture 声明

@@ -15,6 +15,12 @@ class ImplementDef:
     id: str
     source: str
     sql_file: str
+    # Content fingerprint captured at import time and embedded in the stored
+    # version. Empty for definitions parsed from YAML or pre-fingerprint rows.
+    sql_fingerprint: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -37,6 +43,7 @@ class MetricDefinition:
                 id=str(item.get("id", "")),
                 source=str(item.get("source", "")),
                 sql_file=str(item.get("sql_file", "")),
+                sql_fingerprint=str(item.get("sql_fingerprint", "") or ""),
             )
             for item in data.get("impls", [])
             if isinstance(item, Mapping)
@@ -68,16 +75,57 @@ class ImportResult:
     name: str
     version: int
     source_file: str
+    preview: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
 class ImportSummary:
     imported: list[ImportResult] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
+    previews: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not self.errors
+
+    @property
+    def high_risk_count(self) -> int:
+        return sum(1 for item in self.previews if item.get("high_risk"))
+
+
+@dataclass(slots=True)
+class ImpactPreview:
+    """Read-only pre-publish impact assessment for one candidate definition.
+
+    The structure is plain JSON-friendly data so it can travel inside import
+    summaries, CLI output and HTTP responses without extra encoding logic.
+    """
+
+    key: str
+    source_file: str
+    exists: bool
+    current_version: int | None
+    candidate_version: int | None
+    changed: bool
+    high_risk: bool
+    degraded: bool = False
+    risk_reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    added_impls: list[str] = field(default_factory=list)
+    removed_impls: list[str] = field(default_factory=list)
+    modified_impls: list[dict[str, Any]] = field(default_factory=list)
+    sql_fingerprint_changes: list[dict[str, Any]] = field(default_factory=list)
+    grain_changed: bool = False
+    grain_before: str | None = None
+    grain_after: str | None = None
+    unit_changed: bool = False
+    unit_before: str | None = None
+    unit_after: str | None = None
+    affected_run_ids: list[int] = field(default_factory=list)
+    affected_snapshot_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
