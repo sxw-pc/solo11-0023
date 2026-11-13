@@ -4,7 +4,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..errors import NotFoundError, UnsafeSQLError, ValidationError
+import dqkit
+
+from ..errors import NotFoundError, QualityVersionMismatch, UnsafeSQLError, ValidationError
 from ..models import MetricDefinition, ValidationIssue
 
 KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,40}$")
@@ -33,6 +35,26 @@ def resolve_sql_path(sql_file: str, sql_roots: tuple[Path, ...] | list[Path]) ->
     raise NotFoundError(f"受信任 SQL 目录中不存在文件: {sql_file}")
 
 
+def _check_quality_pin(metric: MetricDefinition) -> None:
+    """校验规则声明的质量引擎版本钉，不匹配时抛出可读错误。"""
+    quality = metric.quality or {}
+    api = quality.get("api")
+    if api is None:
+        return
+    if api != dqkit.API_VERSION:
+        raise QualityVersionMismatch(
+            f"质量库版本不匹配: 指标 {metric.key} 要求 dqkit API v{api}，"
+            f"当前安装 dqkit {dqkit.__version__}（API v{dqkit.API_VERSION}）。"
+            "请调整规则文件中的 quality.api，或更换 dqkit 版本后重试。",
+            details={
+                "metric_key": metric.key,
+                "required_api": api,
+                "installed_version": dqkit.__version__,
+                "installed_api": dqkit.API_VERSION,
+            },
+        )
+
+
 def validate_definition(
     metric: MetricDefinition,
     sql_roots: tuple[Path, ...] | list[Path],
@@ -41,6 +63,12 @@ def validate_definition(
 
     def add(field: str, code: str, message: str) -> None:
         issues.append(ValidationIssue(field=field, code=code, message=message))
+
+    quality = metric.quality or {}
+    engine = quality.get("engine")
+    if engine is not None and engine != "dqkit":
+        add("quality.engine", "unknown_engine", f"未知质量引擎: {engine}（当前仅支持 dqkit）")
+    _check_quality_pin(metric)
 
     if not KEY_PATTERN.fullmatch(metric.key or ""):
         add("key", "pattern", "key 必须匹配 ^[a-z][a-z0-9_]{2,40}$")

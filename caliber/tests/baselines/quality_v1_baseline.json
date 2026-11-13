@@ -1,0 +1,155 @@
+{
+  "baseline_note": "dqkit v1 semantics (pre-upgrade), fixtures/ unmodified",
+  "metrics": [
+    {
+      "abs_tolerance": 1e-06,
+      "diffs": [],
+      "dimensions": [
+        "2026-02-01",
+        "2026-02-02",
+        "2026-02-03"
+      ],
+      "impl_values": {
+        "impl_a": {
+          "2026-02-01": 2.0,
+          "2026-02-02": 2.0,
+          "2026-02-03": 2.0
+        },
+        "impl_b": {
+          "2026-02-01": 2.0,
+          "2026-02-02": 2.0,
+          "2026-02-03": 2.0
+        }
+      },
+      "metric_key": "active_users",
+      "metric_version": 1,
+      "rel_tolerance": 0.0,
+      "summary": {
+        "consistent_dimensions": 3,
+        "diff_count": 0,
+        "dimension_count": 3,
+        "impl_count": 2,
+        "missing_dimensions": 0,
+        "value_mismatches": 0
+      },
+      "verdict": "consistent"
+    },
+    {
+      "abs_tolerance": 1e-06,
+      "diffs": [
+        {
+          "detail": "数值超出容差",
+          "dimension": "2026-02-01",
+          "kind": "value_mismatch",
+          "max_delta": 80.0,
+          "values": {
+            "impl_a": 80.0,
+            "impl_b": 160.0
+          }
+        },
+        {
+          "detail": "数值超出容差",
+          "dimension": "2026-02-02",
+          "kind": "value_mismatch",
+          "max_delta": 70.0,
+          "values": {
+            "impl_a": 70.0,
+            "impl_b": 140.0
+          }
+        },
+        {
+          "detail": "数值超出容差",
+          "dimension": "2026-02-03",
+          "kind": "value_mismatch",
+          "max_delta": 90.0,
+          "values": {
+            "impl_a": 90.0,
+            "impl_b": 180.0
+          }
+        },
+        {
+          "detail": "数值超出容差",
+          "dimension": "2026-02-04",
+          "kind": "value_mismatch",
+          "max_delta": 30.0,
+          "values": {
+            "impl_a": 30.0,
+            "impl_b": 60.0
+          }
+        }
+      ],
+      "dimensions": [
+        "2026-02-01",
+        "2026-02-02",
+        "2026-02-03",
+        "2026-02-04"
+      ],
+      "impl_values": {
+        "impl_a": {
+          "2026-02-01": 80.0,
+          "2026-02-02": 70.0,
+          "2026-02-03": 90.0,
+          "2026-02-04": 30.0
+        },
+        "impl_b": {
+          "2026-02-01": 160.0,
+          "2026-02-02": 140.0,
+          "2026-02-03": 180.0,
+          "2026-02-04": 60.0
+        }
+      },
+      "metric_key": "avg_order_value",
+      "metric_version": 1,
+      "rel_tolerance": 0.0,
+      "summary": {
+        "consistent_dimensions": 0,
+        "diff_count": 4,
+        "dimension_count": 4,
+        "impl_count": 2,
+        "missing_dimensions": 0,
+        "value_mismatches": 4
+      },
+      "verdict": "inconsistent"
+    },
+    {
+      "abs_tolerance": 1e-06,
+      "diffs": [],
+      "dimensions": [
+        "2026-02-01",
+        "2026-02-02",
+        "2026-02-03",
+        "2026-02-04"
+      ],
+      "impl_values": {
+        "impl_a": {
+          "2026-02-01": 66.666667,
+          "2026-02-02": 100.0,
+          "2026-02-03": 66.666667,
+          "2026-02-04": 0.0
+        },
+        "impl_b": {
+          "2026-02-01": 66.666667,
+          "2026-02-02": 100.0,
+          "2026-02-03": 66.666667,
+          "2026-02-04": 0.0
+        }
+      },
+      "metric_key": "conversion_rate",
+      "metric_version": 1,
+      "rel_tolerance": 0.0,
+      "summary": {
+        "consistent_dimensions": 4,
+        "diff_count": 0,
+        "dimension_count": 4,
+        "impl_count": 2,
+        "missing_dimensions": 0,
+        "value_mismatches": 0
+      },
+      "verdict": "consistent"
+    }
+  ],
+  "tolerances": {
+    "abs": 1e-06,
+    "rel": 0.0
+  }
+}

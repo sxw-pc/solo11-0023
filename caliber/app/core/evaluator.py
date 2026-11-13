@@ -12,6 +12,8 @@ from ..errors import EvaluationError, EvaluationTimeout, UnsafeSQLError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition
 from .comparator import compare_impl_results
 from .dsl_validator import resolve_sql_path
+from .quality import get_semantics
+from .quality.base import QualitySemantics
 
 FORBIDDEN = re.compile(
     r"\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|ATTACH|DETACH|PRAGMA|"
@@ -106,15 +108,6 @@ def truncate_dimension(value: Any, grain: str) -> str:
     return text
 
 
-def _numeric(value: Any, impl_id: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise EvaluationError(
-            f"实现 {impl_id} 返回的指标值不是数值: {value!r}",
-            details={"impl_id": impl_id},
-        )
-    return float(value)
-
-
 def evaluate_sql(
     conn: sqlite3.Connection,
     sql: str,
@@ -123,8 +116,10 @@ def evaluate_sql(
     max_rows: int = 10_000,
     grain: str = "day",
     impl_id: str = "impl",
-) -> tuple[dict[str, float], int, float]:
+    semantics: QualitySemantics | None = None,
+) -> tuple[dict[str, float | None], int, float]:
     """Execute one query on a query-only connection with timeout and row cap."""
+    sem = semantics or get_semantics(None)
     validated = validate_readonly_sql(sql)
     started = time.monotonic()
     deadline = started + max(0.001, float(timeout_seconds))
@@ -147,7 +142,7 @@ def evaluate_sql(
                 code="row_limit_exceeded",
                 details={"impl_id": impl_id, "max_rows": max_rows},
             )
-        values: dict[str, float] = {}
+        values: dict[str, float | None] = {}
         for row in fetched:
             if len(description) == 1:
                 dimension, value = "__all__", row[0]
@@ -159,7 +154,7 @@ def evaluate_sql(
                     f"实现 {impl_id} 返回重复维度: {dimension}",
                     details={"impl_id": impl_id, "dimension": dimension},
                 )
-            values[dimension] = _numeric(value, impl_id)
+            values[dimension] = sem.assess_value(value, impl_id=impl_id)
         conn.rollback()
         return values, len(fetched), (time.monotonic() - started) * 1000
     except sqlite3.OperationalError as exc:
@@ -191,7 +186,9 @@ def evaluate_metric_impls(
     *,
     timeout_seconds: float = 5.0,
     max_rows: int = 10_000,
+    semantics: QualitySemantics | None = None,
 ) -> dict[str, ImplEvaluation]:
+    sem = semantics or get_semantics(None)
     results: dict[str, ImplEvaluation] = {}
     conn = catalog.readonly_connection()
     for impl in metric.impls:
@@ -208,6 +205,7 @@ def evaluate_metric_impls(
             max_rows=max_rows,
             grain=metric.grain,
             impl_id=impl.id,
+            semantics=sem,
         )
         results[impl.id] = ImplEvaluation(
             impl_id=impl.id,
@@ -230,7 +228,9 @@ def run_metric(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    semantics: QualitySemantics | None = None,
 ) -> tuple[ComparisonResult, dict[str, ImplEvaluation]]:
+    sem = semantics or get_semantics(None)
     evaluations = evaluate_metric_impls(
         metric,
         version,
@@ -238,6 +238,7 @@ def run_metric(
         sql_roots,
         timeout_seconds=timeout_seconds,
         max_rows=max_rows,
+        semantics=sem,
     )
     comparison = compare_impl_results(
         {impl_id: item.values for impl_id, item in evaluations.items()},
@@ -245,5 +246,6 @@ def run_metric(
         metric_version=version,
         abs_tolerance=abs_tolerance,
         rel_tolerance=rel_tolerance,
+        semantics=sem,
     )
     return comparison, evaluations

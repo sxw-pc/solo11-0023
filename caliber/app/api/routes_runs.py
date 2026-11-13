@@ -7,6 +7,7 @@ from typing import Any
 from flask import Blueprint, current_app, g, jsonify, request
 
 from ..core.dataset_loader import load_catalog
+from ..core.quality import MODES
 from ..core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
 from ..errors import CaliberError
 
@@ -43,6 +44,12 @@ def create_run():
         raise CaliberError("请求体必须是 JSON 对象")
     config = current_app.config["CALIBER"]
     keys = _metric_keys(payload)
+    quality_mode = payload.get("quality_mode")
+    if quality_mode is not None and quality_mode not in MODES:
+        raise CaliberError(
+            f"未知质量语义模式: {quality_mode!r}；可选值: {', '.join(MODES)}",
+            code="unknown_quality_mode",
+        )
     datasets_dir = Path(payload.get("datasets_dir") or config.datasets_dir).expanduser().resolve()
     catalog = load_catalog(datasets_dir)
     try:
@@ -56,6 +63,7 @@ def create_run():
             max_rows=config.max_result_rows,
             abs_tolerance=_tolerance(payload, "abs", config.abs_tolerance),
             rel_tolerance=_tolerance(payload, "rel", config.rel_tolerance),
+            quality_mode=quality_mode or config.quality_mode,
         )
     finally:
         catalog.close()

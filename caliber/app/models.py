@@ -26,9 +26,18 @@ class MetricDefinition:
     unit: str
     grain: str
     impls: list[ImplementDef]
+    schema_version: int = 1
+    quality: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # 旧版（schema 1）定义保持与迁移前完全一致的字节形态，
+        # 只有新格式规则才携带 schema_version / quality 字段。
+        if self.schema_version == 1:
+            data.pop("schema_version", None)
+        if self.quality is None:
+            data.pop("quality", None)
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "MetricDefinition":
@@ -41,6 +50,7 @@ class MetricDefinition:
             for item in data.get("impls", [])
             if isinstance(item, Mapping)
         ]
+        quality = data.get("quality")
         return cls(
             key=str(data.get("key", "")),
             name=str(data.get("name", "")),
@@ -49,6 +59,8 @@ class MetricDefinition:
             unit=str(data.get("unit", "")),
             grain=str(data.get("grain", "")),
             impls=impls,
+            schema_version=int(data.get("schema_version", 1) or 1),
+            quality=dict(quality) if isinstance(quality, Mapping) else None,
         )
 
 
@@ -104,7 +116,7 @@ class ImplEvaluation:
     impl_id: str
     source: str
     sql_file: str
-    values: dict[str, float]
+    values: dict[str, float | None]
     row_count: int
     duration_ms: float
 
@@ -132,6 +144,7 @@ class ComparisonResult:
     summary: dict[str, Any]
     abs_tolerance: float
     rel_tolerance: float
+    execution_meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

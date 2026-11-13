@@ -27,6 +27,7 @@ class Config:
     max_result_rows: int = 10_000
     abs_tolerance: float = 1e-6
     rel_tolerance: float = 0.0
+    quality_mode: str = "compat"  # legacy（回退）/ compat（兼容适配，默认）/ v2（纯新语义）
     testing: bool = False
 
     @classmethod
@@ -46,6 +47,7 @@ class Config:
             sql_roots=(fixtures / "impls",),
             host=host,
             port=int(os.environ.get("CALIBER_PORT", "5057")),
+            quality_mode=os.environ.get("CALIBER_QUALITY_MODE", "compat"),
         )
 
     def ensure_dirs(self) -> None:

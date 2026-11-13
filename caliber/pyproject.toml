@@ -23,7 +23,7 @@ test = [
 caliber = "cli.main:main"
 
 [tool.setuptools.packages.find]
-include = ["app*", "cli*"]
+include = ["app*", "cli*", "dqkit*"]
 
 [tool.setuptools.package-data]
 app = ["templates/*.html", "static/*.css", "static/*.js"]

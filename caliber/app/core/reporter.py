@@ -46,6 +46,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
                     "abs": result.get("abs_tolerance"),
                     "rel": result.get("rel_tolerance"),
                 },
+                "execution_meta": result.get("execution_meta", {}),
                 "snapshot_id": snapshot["id"],
             }
         )
@@ -112,6 +113,23 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"- 单位 / 粒度：{item['unit']} / {item['grain']}",
                 f"- 数据集：{', '.join(item['datasets'])}",
                 f"- 维度数：{item['summary'].get('dimension_count', 0)}",
+            ]
+        )
+        meta = item.get("execution_meta") or {}
+        if meta:
+            engine = meta.get("engine") or {}
+            lines.append(
+                f"- 质量语义：{meta.get('semantics_mode', '-')}"
+                f"（{engine.get('name', 'dqkit')} {engine.get('version', '?')}）"
+            )
+            difference_count = len(meta.get("semantic_differences") or [])
+            if difference_count:
+                lines.append(
+                    f"- 语义差异：{difference_count} 处已按兼容口径调和"
+                    "（详见 JSON 报告 execution_meta.semantic_differences）"
+                )
+        lines.extend(
+            [
                 "",
                 "| 实现 | 数据集 | 行数 | 耗时(ms) |",
                 "| --- | --- | --- | --- |",
@@ -188,6 +206,18 @@ def render_html(report: dict[str, Any]) -> str:
             f"{html.escape(item['unit'])} · 粒度 {html.escape(item['grain'])} · 数据集 "
             f"{html.escape(', '.join(item['datasets']))}</p>"
         )
+        meta = item.get("execution_meta") or {}
+        if meta:
+            engine = meta.get("engine") or {}
+            note = (
+                f"质量语义 {html.escape(str(meta.get('semantics_mode', '-')))}"
+                f"（{html.escape(str(engine.get('name', 'dqkit')))} "
+                f"{html.escape(str(engine.get('version', '?')))}）"
+            )
+            difference_count = len(meta.get("semantic_differences") or [])
+            if difference_count:
+                note += f" · 语义差异 {difference_count} 处已按兼容口径调和"
+            parts.append(f"<p class=\"meta\">{note}</p>")
         parts.append("<table><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th></tr>")
         for impl in item["implementations"]:
             parts.append(

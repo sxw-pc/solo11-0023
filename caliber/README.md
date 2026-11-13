@@ -41,6 +41,9 @@ python -m app import-metrics --dir fixtures/metrics
 python -m app run --metrics active_users,conversion_rate,avg_order_value \
   --datasets fixtures/datasets
 
+# 2b) 可选：切换质量语义模式（默认 compat 兼容适配；v2 纯新语义；legacy 回退旧引擎）
+python -m app run --datasets fixtures/datasets --quality-mode v2
+
 # 3) 导出最近一次运行的 Markdown 报告
 python -m app report --last --format md
 
@@ -109,6 +112,17 @@ SQL 约定：
 
 校验器会检查 key 格式、粒度枚举、至少两个实现、实现 ID 重复、SQL 文件存在性及路径白名单。错误以字段级列表返回。
 
+### 规则格式版本（schema）
+
+规则文件有两个格式版本，对应底层质量库 dqkit 的两个大版本：
+
+| `schema` | 实现字段 | 额外字段 | 说明 |
+| --- | --- | --- | --- |
+| `1`（或省略） | `source` / `sql_file` | 无 | 旧版格式。**历史规则文件无需任何修改**，由兼容适配层翻译到新引擎执行。 |
+| `2` | `dataset` / `query` | `quality: {engine, api}` | dqkit 2.x 原生格式。`quality.api` 是版本钉，导入时与当前安装的 dqkit 校验，不匹配会报可读的 `quality_version_mismatch`。 |
+
+未知 `schema` 版本（如 `schema: 3`）会在解析期给出明确错误，而不是按猜测执行。
+
 ## 4. 一致性判定规则
 
 对同一指标的每个实现，分别得到 `维度 -> 数值` 的字典，然后对所有实现的结果取维度并集逐项比较。数值相等判定为：
@@ -119,6 +133,10 @@ SQL 约定：
 
 边界值按「不超过」视为一致。默认绝对容差为 `1e-6`，相对容差为 `0.0`；可在 CLI 使用 `--abs-tol` / `--rel-tol`，或在 API 请求体传入 `tolerances: {abs, rel}`。
 
+> 上述公式是 **v1（兼容）口径**。自 0.2 起，空值判定与阈值区间的实际语义由可插拔的
+> 质量语义提供者执行（默认 `compat` 模式复现上述口径）；纯 v2 模式下阈值为开区间、
+> 空值不再报错。详见「5. 质量引擎（dqkit）升级与语义兼容」。
+
 判定为三态：
 
 - `consistent`：所有实现拥有相同维度集合，且每个维度的数值都在容差内。
@@ -127,13 +145,68 @@ SQL 约定：
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
 
-## 5. 目录结构
+## 5. 质量引擎（dqkit）升级与语义兼容
+
+底层数据质量库已从 **dqkit 1.4.2 升级到 dqkit 2.0.0**（新大版本，源码 vendored
+在 `dqkit/`，锁定版本，保持完全离线）。2.x 更改了接口形态（位置参数 → 规格对象，
+松散字典 → 结构化报告）和两处核心语义。caliber 的执行主干（求值器/比对器/快照）
+不硬编码任何空值或阈值策略，而是委托给 `app/core/quality/` 下可插拔的语义提供者。
+
+### 两版语义差异（适配层显式处理，不静默丢弃）
+
+| 语义点 | dqkit v1（旧） | dqkit v2（新） | compat 适配层的处理 |
+| --- | --- | --- | --- |
+| 空值判定 | NULL 指标值直接求值失败 | 标记为 `null_value` 继续执行，判定转为 `partial` | 复现 v1 错误，并把这次调和写入错误详情的 `semantic_differences` |
+| 阈值区间 | 闭区间：差值 ≤ 阈值即一致 | 开区间：差值必须 < 阈值，压线判不一致 | 压线对（`boundary_hit`）按 v1 翻回一致，维度级差异写入 `semantic_differences`（类型 `threshold_boundary`） |
+
+### 三种语义模式（可切换、可回退）
+
+| 模式 | 说明 |
+| --- | --- |
+| `compat`（默认） | 驱动 dqkit 2.x 执行，把每个结果调和回 v1 口径，并记录全部语义差异。迁移期默认。 |
+| `v2` | 关闭兼容层，纯 dqkit 2.x 新语义。目标终态；用于验证适配层可插拔。 |
+| `legacy` | 冻结的 dqkit 1.4.2 引擎（`dqkit/v1.py`）。**回退路径**：适配层出现异常时立即回到旧引擎。 |
+
+切换方式（优先级从高到低）：CLI `run --quality-mode {legacy,compat,v2}` →
+API 请求体 `quality_mode` → 环境变量 `CALIBER_QUALITY_MODE` →
+`Config.quality_mode`（默认 `compat`）。
+
+### 执行元信息（差异可追溯）
+
+每次比对的快照 `result_json` 和 JSON 报告都携带 `execution_meta`：
+
+```json
+{
+  "semantics_mode": "compat",
+  "engine": {"name": "dqkit", "version": "2.0.0", "api": 2},
+  "semantics_applied": {"null_handling": "...", "threshold_boundary": "..."},
+  "semantic_differences": [
+    {"type": "threshold_boundary", "dimension": "2026-02-01",
+     "pairs": [{"left": "impl_a", "right": "impl_b", "delta": 0.5, "threshold": 0.5}],
+     "v1_outcome": "match", "v2_outcome": "mismatch", "resolution": "kept_v1"}
+  ]
+}
+```
+
+运行级汇总在 `runs.summary_json.quality`（模式、引擎版本、差异调和计数）。
+**迁移前的历史快照**没有该字段：读取时按 v1 口径回填并标记
+`artifact_note`，老产物照常解析，且能与新产物明确区分。
+
+### 版本不匹配行为
+
+- 适配层启动时校验 dqkit 的 `API_VERSION`；规则文件还可用 `quality.api` 钉版本。
+- 不匹配时抛出可读的 `quality_version_mismatch`（CLI 退出码 1，API 返回
+  400 JSON），消息包含期望/实际版本与修复建议，不会崩栈。
+- `legacy` 回退模式不依赖 dqkit 2.x，升级失败时仍可使用。
+
+## 6. 目录结构
 
 ```text
 caliber/
 ├── README.md
 ├── requirements.txt
 ├── pyproject.toml
+├── dqkit/                 # vendored 数据质量库：2.0.0 新引擎 + 冻结的 v1 回退拷贝
 ├── app/
 │   ├── __init__.py          # Flask 工厂、本地页面、错误边界
 │   ├── __main__.py          # python -m app
@@ -144,6 +217,7 @@ caliber/
 │   ├── audit.py             # 审计日志
 │   ├── api/                 # 指标、运行、数据集、报告 API
 │   ├── core/                # DSL、校验、仓库、求值、比对、快照、报告
+│   │   └── quality/         # 质量语义提供者：legacy / compat（适配层）/ v2
 │   ├── templates/           # 本地 Jinja 页面
 │   └── static/              # 原生 CSS/JS，无外部依赖
 ├── cli/main.py              # serve / import-metrics / run / report
@@ -152,9 +226,10 @@ caliber/
 │   ├── metrics/             # 合成 YAML 指标
 │   └── impls/               # 合成只读 SQL
 └── tests/                   # pytest 全链路测试
+    └── baselines/           # dqkit v1 语义基线（迁移回归对照）
 ```
 
-## 6. 主要 HTTP 接口
+## 7. 主要 HTTP 接口
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -175,11 +250,14 @@ caliber/
 {
   "metrics": ["active_users", "avg_order_value"],
   "datasets_dir": "fixtures/datasets",
-  "tolerances": {"abs": 0.000001, "rel": 0}
+  "tolerances": {"abs": 0.000001, "rel": 0},
+  "quality_mode": "compat"
 }
 ```
 
-## 7. 安全与合规
+`quality_mode` 可省略（默认取 `Config.quality_mode`，即 `compat`）。
+
+## 8. 安全与合规
 
 - **只读 SQL**：语句白名单只允许 `SELECT` / `WITH`；显式拒绝写入、DDL、ATTACH、PRAGMA、事务控制等关键字，并拒绝多语句。求值连接设置 `PRAGMA query_only = ON`，每次查询在事务中执行后回滚。违规语句抛出 `unsafe_sql`，测试覆盖写操作和 ATTACH。
 - **路径白名单**：`sql_file` 只能相对受信任 SQL 目录解析。绝对路径、`..`、锚点路径以及逃逸出根目录的解析结果均被拒绝。
@@ -188,7 +266,7 @@ caliber/
 - **审计**：导入、运行、失败与报告导出写入本地 `audit_log`；异常由 CLI/HTTP 边界统一捕获，不静默失败。
 - **无真实敏感信息**：仓库没有真实密钥、令牌、公司名、真实域名或真实 IP。
 
-## 8. 数据与 fixture 声明
+## 9. 数据与 fixture 声明
 
 `fixtures/` 中全部 CSV、YAML、SQL 均为本项目的**合成数据**，不对应任何真实用户、订单、组织或业务系统。用户 ID、订单 ID、渠道名、金额和时间均为手工构造；仅用于演示一致与不一致两类场景：
 
@@ -198,7 +276,7 @@ caliber/
 
 任何示例使用的域名仅限 `example.invalid`、`localhost` 或 `127.0.0.1`；本项目实际上不做 DNS 或 HTTP 出站访问。
 
-## 9. 已知限制与后续方向
+## 10. 已知限制与后续方向
 
 当前限制：
 

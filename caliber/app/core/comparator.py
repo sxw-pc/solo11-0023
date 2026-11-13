@@ -1,11 +1,21 @@
-"""Pure multi-implementation comparison and verdict calculation."""
+"""比对调度：执行主干只负责编排，空值/阈值语义全部委托给质量语义提供者。
+
+历史背景：本模块曾经内联实现容差比较与空值处理（即 dqkit 1.x 语义）。
+质量库升级到 dqkit 2.x 后，这些语义迁移到了 ``app.core.quality`` 的
+可插拔提供者（legacy / compat / v2），本模块不再硬编码任何旧语义。
+"""
 from __future__ import annotations
 
-from itertools import combinations
 from typing import Mapping
 
 from ..errors import CaliberError
-from ..models import ComparisonResult, DimensionDiff
+from ..models import ComparisonResult
+from .quality import get_semantics
+from .quality.base import QualitySemantics
+
+
+def _resolve(semantics: QualitySemantics | None) -> QualitySemantics:
+    return semantics if semantics is not None else get_semantics(None)
 
 
 def values_match(
@@ -13,96 +23,37 @@ def values_match(
     right: float,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    *,
+    semantics: QualitySemantics | None = None,
 ) -> bool:
-    """Absolute + relative tolerance; equality at the boundary is a match."""
-    difference = abs(left - right)
-    scale = max(abs(left), abs(right))
-    return difference <= abs_tolerance + rel_tolerance * scale
+    """按当前语义模式判断两个数值是否落在容差内。"""
+    return _resolve(semantics).pair_match(left, right, abs_tolerance, rel_tolerance)
 
 
 def compare_impl_results(
-    results: Mapping[str, Mapping[str, float]],
+    results: Mapping[str, Mapping[str, float | None]],
     *,
     metric_key: str = "metric",
     metric_version: int = 0,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    semantics: QualitySemantics | None = None,
 ) -> ComparisonResult:
+    """对多实现结果做一致性比对，并把执行元信息附加到结果上。"""
     if abs_tolerance < 0 or rel_tolerance < 0:
         raise CaliberError("容差必须是非负数")
-    impl_ids = list(results)
-    dimensions = sorted({dimension for values in results.values() for dimension in values})
-    diffs: list[DimensionDiff] = []
-    value_mismatches = 0
-    missing_dimensions = 0
-
-    for dimension in dimensions:
-        aligned: dict[str, float | None] = {
-            impl_id: results[impl_id].get(dimension) for impl_id in impl_ids
-        }
-        present = {
-            impl_id: float(value)
-            for impl_id, value in aligned.items()
-            if value is not None
-        }
-        missing = [impl_id for impl_id, value in aligned.items() if value is None]
-        max_delta = 0.0
-        mismatch = False
-        for left_id, right_id in combinations(present, 2):
-            delta = abs(present[left_id] - present[right_id])
-            max_delta = max(max_delta, delta)
-            if not values_match(
-                present[left_id], present[right_id], abs_tolerance, rel_tolerance
-            ):
-                mismatch = True
-        if mismatch:
-            value_mismatches += 1
-            detail = "数值超出容差"
-            if missing:
-                detail += f"；同时缺少实现: {', '.join(missing)}"
-            diffs.append(
-                DimensionDiff(
-                    dimension=dimension,
-                    kind="value_mismatch",
-                    values=aligned,
-                    max_delta=max_delta,
-                    detail=detail,
-                )
-            )
-        elif missing:
-            missing_dimensions += 1
-            diffs.append(
-                DimensionDiff(
-                    dimension=dimension,
-                    kind="missing_dimension",
-                    values=aligned,
-                    max_delta=None,
-                    detail=f"以下实现缺少该维度: {', '.join(missing)}",
-                )
-            )
-
-    if value_mismatches:
-        verdict = "inconsistent"
-    elif missing_dimensions:
-        verdict = "partial"
-    else:
-        verdict = "consistent"
-    summary = {
-        "impl_count": len(impl_ids),
-        "dimension_count": len(dimensions),
-        "consistent_dimensions": len(dimensions) - len(diffs),
-        "value_mismatches": value_mismatches,
-        "missing_dimensions": missing_dimensions,
-        "diff_count": len(diffs),
-    }
-    return ComparisonResult(
+    sem = _resolve(semantics)
+    comparison, differences = sem.compare_impls(
+        results,
         metric_key=metric_key,
-        metric_version=int(metric_version),
-        impl_ids=impl_ids,
-        verdict=verdict,
-        dimensions=dimensions,
-        diffs=diffs,
-        summary=summary,
-        abs_tolerance=float(abs_tolerance),
-        rel_tolerance=float(rel_tolerance),
+        metric_version=metric_version,
+        abs_tolerance=abs_tolerance,
+        rel_tolerance=rel_tolerance,
     )
+    comparison.execution_meta = {
+        "semantics_mode": sem.mode,
+        "engine": sem.engine_meta(),
+        "semantics_applied": sem.semantics_applied(),
+        "semantic_differences": differences,
+    }
+    return comparison

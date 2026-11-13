@@ -69,6 +69,12 @@ class EvaluationTimeout(EvaluationError):
     code = "evaluation_timeout"
 
 
+class QualityVersionMismatch(CaliberError):
+    """数据质量库（dqkit）版本与适配层/规则要求不一致。"""
+
+    code = "quality_version_mismatch"
+
+
 class ReportError(CaliberError):
     code = "report_error"
 

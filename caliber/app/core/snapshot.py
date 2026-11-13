@@ -10,6 +10,7 @@ from ..audit import log_audit, record_error
 from ..errors import CaliberError, NotFoundError, RunError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition, utc_now
 from .evaluator import run_metric
+from .quality import get_semantics, legacy_artifact_meta
 from .versioning import get_latest, list_metrics
 
 VERDICTS = ("consistent", "inconsistent", "partial")
@@ -21,6 +22,10 @@ def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
     item["impl_ids"] = json.loads(item.pop("impl_ids_json"))
     item["summary"] = json.loads(item.pop("summary_json"))
     item["result"] = json.loads(item.pop("result_json"))
+    # 迁移前的历史快照没有 execution_meta：读取时按 v1 口径回填，
+    # 显式标记为老产物，而不是静默缺省。
+    meta = item["result"].get("execution_meta")
+    item["result"]["execution_meta"] = meta if isinstance(meta, dict) else legacy_artifact_meta()
     return item
 
 
@@ -159,14 +164,24 @@ def perform_run(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    quality_mode: str | None = None,
 ) -> int:
     keys = list(dict.fromkeys(metric_keys or [item["key"] for item in list_metrics(conn)]))
     if not keys:
         raise RunError("没有可执行的指标，请先导入指标定义")
+    # 版本不匹配等升级问题在这里就会以可读错误抛出，不会产生半截运行记录。
+    semantics = get_semantics(quality_mode)
     tolerances = {"abs": float(abs_tolerance), "rel": float(rel_tolerance)}
     run_id = create_run(conn, keys, datasets_dir, tolerances)
-    log_audit(conn, "run.started", f"run:{run_id}", "ok", {"metrics": keys})
+    log_audit(
+        conn,
+        "run.started",
+        f"run:{run_id}",
+        "ok",
+        {"metrics": keys, "quality_mode": semantics.mode},
+    )
     summary = {verdict: 0 for verdict in VERDICTS}
+    semantic_differences = 0
     try:
         for key in keys:
             latest = get_latest(conn, key)
@@ -180,17 +195,29 @@ def perform_run(
                 max_rows=max_rows,
                 abs_tolerance=abs_tolerance,
                 rel_tolerance=rel_tolerance,
+                semantics=semantics,
             )
             save_snapshot(conn, run_id, metric, comparison, evaluations)
             summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
+            semantic_differences += len(
+                comparison.execution_meta.get("semantic_differences", [])
+            )
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id
+        summary["quality"] = {
+            "mode": semantics.mode,
+            "engine": semantics.engine_meta(),
+            "semantic_differences": semantic_differences,
+        }
         finish_run(conn, run_id, status="completed", summary=summary)
         log_audit(conn, "run.completed", f"run:{run_id}", "ok", summary)
         return run_id
     except Exception as exc:
         finish_run(conn, run_id, status="failed", error=str(exc))
-        record_error(conn, "run.failed", f"run:{run_id}", exc, extra={"metrics": keys})
+        extra: dict[str, Any] = {"metrics": keys, "quality_mode": semantics.mode}
+        if isinstance(exc, CaliberError) and exc.details is not None:
+            extra["details"] = exc.details
+        record_error(conn, "run.failed", f"run:{run_id}", exc, extra=extra)
         if isinstance(exc, CaliberError):
             raise
         raise RunError(f"比对运行失败: {exc}") from exc

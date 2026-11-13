@@ -38,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--datasets", type=Path, help="CSV 数据集目录")
     run.add_argument("--abs-tol", type=float, default=None, help="绝对容差")
     run.add_argument("--rel-tol", type=float, default=None, help="相对容差")
+    run.add_argument(
+        "--quality-mode",
+        choices=("legacy", "compat", "v2"),
+        default=None,
+        help="质量语义模式：legacy 回退旧引擎 / compat 兼容适配（默认）/ v2 纯新语义",
+    )
     run.set_defaults(handler=_run)
 
     report = sub.add_parser("report", help="导出比对报告")
@@ -91,6 +97,7 @@ def _import_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Conn
 def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
     datasets_dir = (args.datasets or config.datasets_dir).expanduser().resolve()
     keys = [item.strip() for item in args.metrics.split(",") if item.strip()] if args.metrics else None
+    quality_mode = args.quality_mode or config.quality_mode
     catalog = load_catalog(datasets_dir)
     try:
         run_id = perform_run(
@@ -103,11 +110,22 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
             max_rows=config.max_result_rows,
             abs_tolerance=config.abs_tolerance if args.abs_tol is None else args.abs_tol,
             rel_tolerance=config.rel_tolerance if args.rel_tol is None else args.rel_tol,
+            quality_mode=quality_mode,
         )
     finally:
         catalog.close()
     run = get_run(conn, run_id)
-    print(f"运行 #{run_id} 完成：{json.dumps(run['summary'], ensure_ascii=False)}")
+    quality = run["summary"].get("quality", {})
+    print(
+        f"运行 #{run_id} 完成：{json.dumps(run['summary'], ensure_ascii=False)}"
+    )
+    if quality:
+        engine = quality.get("engine", {})
+        print(
+            f"质量语义模式: {quality.get('mode', quality_mode)}"
+            f"（{engine.get('name', 'dqkit')} {engine.get('version', '?')}），"
+            f"语义差异调和 {quality.get('semantic_differences', 0)} 处"
+        )
     for snapshot in snapshots_for_run(conn, run_id):
         print(f"- {snapshot['metric_key']} v{snapshot['metric_version']}: {snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})")
     print(f"导出报告: python -m app report --run-id {run_id} --format md")
