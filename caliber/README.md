@@ -127,6 +127,36 @@ SQL 约定：
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
 
+### 4.1 批次基线对照
+
+单 run 内的 verdict 只能自洽，回答不了「这批比上一批变差了没有」。在 runs/snapshots/audit_log 之上，每次 run 可以锚定一个**基线 run** 做批次间对照。对照策略固定为 `pre_align_post_finalize`，并写入执行元信息 `summary_json.baseline_comparison.strategy`：
+
+1. **执行前结构对齐（预检）**：run 创建、任何指标求值之前，先解析基线 run，校验其状态，并把基线快照按 `metric_key` 与本次待跑指标清单做结构对齐，结果写入 `audit_log` 的 `baseline.aligned` 事件。
+2. **全量跑完后定稿**：指标执行与快照落库路径完全不感知基线；全量完成后，再基于两侧已经落库的不可变快照定稿 verdict、impl 集合与维度差值的对照结论。
+
+选择这一混合策略而不是「落库前全量预检」或「边跑边逐条对照」的原因：对照结论只在全量完成后写入，半成品 run 永远不具备基线资格，中断重跑会自然回退到上一个合格基线，不需要回滚半成品对照状态；基线按 run id 锚定且快照不可变，并发 run 对同一基线的结论确定性一致，不需要额外加锁。
+
+基线选取规则：
+
+- CLI 传 `--baseline-run-id <id>` 或 API 传 `baseline_run_id` 时显式锚定；省略时自动选取**最近一个指标集合与本次完全相同的 `completed` run**。
+- 基线 run 处于 `failed`/`running` 等非 completed 状态、显式 id 不存在、或自动选取找不到同集合候选时，**不拒绝整批**，而是降级为本批次无对照，在 `baseline_comparison.status = "degraded"` 与 `degrade_reason` 中写明原因（`baseline_not_completed` / `baseline_run_not_found` / `no_matching_baseline`）。
+
+逐指标的可比性判定（同样不拒绝整批，只标记）：
+
+| 不可比原因 | 触发条件 |
+| --- | --- |
+| `baseline_metric_missing` | 基线 run 缺少该指标（本次新增指标） |
+| `metric_version_mismatch` | 基线与本次的 metric 版本号不一致，**显式标记不可比，不静默对齐** |
+| `impl_set_changed` | 两侧 impl id 集合不同（新增/缩减实现），附 `impls_added` / `impls_removed` |
+
+可比指标进一步给出 `verdict_change`（`regressed` / `improved` / `unchanged`，按 consistent < partial < inconsistent 排序）与 `dimension_changes`（维度新增/移除、问题维度新增/移除、差异类型变化）。可读定位汇总在 `summary_text`，并在 Markdown/HTML 报告的「批次基线对照」段落展示。
+
+开关与兼容性：
+
+- 默认开启对照；CLI 传 `--no-baseline-compare` 或 API 传 `"compare_baseline": false` 可关闭。
+- 关闭后 `runs.summary_json` 不含 `baseline_comparison` 字段，形状与老版本完全一致。
+- **snapshots 表结构与字段零改动**，所有对照结论只扩展在 `runs.summary_json`；老 run 没有该字段时报告不渲染基线段落，老报告读取不受影响。
+
 ## 5. 目录结构
 
 ```text
@@ -175,9 +205,13 @@ caliber/
 {
   "metrics": ["active_users", "avg_order_value"],
   "datasets_dir": "fixtures/datasets",
-  "tolerances": {"abs": 0.000001, "rel": 0}
+  "tolerances": {"abs": 0.000001, "rel": 0},
+  "baseline_run_id": 12,
+  "compare_baseline": true
 }
 ```
+
+`baseline_run_id` 省略时自动选取同指标集合的上一个 completed run；`compare_baseline` 设为 `false` 可关闭对照（对应 CLI 的 `--no-baseline-compare`，另有 `--baseline-run-id`）。对照结论在响应 `run.summary.baseline_comparison` 中返回。
 
 ## 7. 安全与合规
 

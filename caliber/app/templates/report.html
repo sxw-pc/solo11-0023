@@ -36,6 +36,53 @@
     <div class="stat"><span class="num">{{ report.summary.drift_count }}</span><span>漂移事件</span></div>
   </section>
 
+  {% set baseline = report.run.summary.baseline_comparison %}
+  {% if baseline %}
+  <section class="panel">
+    <div class="panel-head">
+      <h2>批次基线对照</h2>
+      <span class="pill {{ 'partial' if baseline.status == 'degraded' else 'consistent' }}">
+        {{ '已降级（无对照）' if baseline.status == 'degraded' else '有效对照' }}
+      </span>
+    </div>
+    <p class="muted">
+      策略 <code>{{ baseline.strategy }}</code> · 选择方式 {{ baseline.baseline_selection }} ·
+      基线 run #{{ baseline.baseline_run_id if baseline.baseline_run_id is not none else '无' }}
+    </p>
+    <p>{{ baseline.summary_text }}</p>
+    {% if baseline.status == 'degraded' %}
+    <p class="muted">降级原因：<code>{{ baseline.degrade_reason }}</code></p>
+    {% elif baseline.metrics %}
+    <table>
+      <thead>
+        <tr><th>指标</th><th>可比性</th><th>基线判定</th><th>本次判定</th><th>变化</th><th>不可比原因</th></tr>
+      </thead>
+      <tbody>
+      {% for key in baseline.metrics | sort %}
+        {% set item = baseline.metrics[key] %}
+        <tr>
+          <td><code>{{ key }}</code></td>
+          {% if item.comparable %}
+          <td><span class="pill consistent">可比</span></td>
+          <td>{{ item.baseline_verdict }}</td>
+          <td>{{ item.current_verdict }}</td>
+          <td>{{ item.verdict_change }}</td>
+          <td class="muted">-</td>
+          {% else %}
+          <td><span class="pill inconsistent">不可比</span></td>
+          <td>{{ item.baseline_verdict or '缺失' }}</td>
+          <td>{{ item.current_verdict or '-' }}</td>
+          <td class="muted">-</td>
+          <td>{{ item.reasons | join(', ') }}</td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {% for item in report.metrics %}
   <section class="panel metric-report">
     <div class="panel-head">

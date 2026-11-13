@@ -141,6 +141,30 @@ def test_web_pages_are_local_and_render(imported_client, app_config):
     report = imported_client.get(f"/reports/{run_id}")
     assert report.status_code == 200
     assert "指标一致性报告" in report.get_data(as_text=True)
+    # 首次 run 无基线：报告页应展示降级的批次对照段落
+    body = report.get_data(as_text=True)
+    assert "批次基线对照" in body
+    assert "已降级（无对照）" in body
+
+    second = imported_client.post(
+        "/api/runs",
+        json={"metrics": ["active_users"], "datasets_dir": str(app_config.datasets_dir)},
+    )
+    second_id = second.get_json()["run"]["id"]
+    second_page = imported_client.get(f"/reports/{second_id}")
+    second_body = second_page.get_data(as_text=True)
+    assert "有效对照" in second_body
+    assert "unchanged" in second_body
+
+    # 关闭对照的 run：页面上不渲染基线段落
+    third = imported_client.post(
+        "/api/runs",
+        json={"metrics": ["active_users"], "datasets_dir": str(app_config.datasets_dir),
+              "compare_baseline": False},
+    )
+    third_id = third.get_json()["run"]["id"]
+    third_page = imported_client.get(f"/reports/{third_id}")
+    assert "批次基线对照" not in third_page.get_data(as_text=True)
 
     assert imported_client.get("/metrics/missing").status_code == 404
     assert imported_client.get("/reports/999").status_code == 404

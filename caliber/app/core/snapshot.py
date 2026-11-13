@@ -159,13 +159,31 @@ def perform_run(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    baseline_run_id: int | None = None,
+    compare_baseline: bool = True,
 ) -> int:
+    from .baseline import build_baseline_comparison, failure_anchor, resolve_baseline
+
     keys = list(dict.fromkeys(metric_keys or [item["key"] for item in list_metrics(conn)]))
     if not keys:
         raise RunError("没有可执行的指标，请先导入指标定义")
     tolerances = {"abs": float(abs_tolerance), "rel": float(rel_tolerance)}
+    # 执行前解析基线并完成结构对齐（只读）；任何降级都不会拒绝整批。
+    plan = resolve_baseline(
+        conn, keys, baseline_run_id=baseline_run_id, compare_baseline=compare_baseline
+    )
     run_id = create_run(conn, keys, datasets_dir, tolerances)
-    log_audit(conn, "run.started", f"run:{run_id}", "ok", {"metrics": keys})
+    # 关闭对照时审计载荷与老路径保持一致，不夹带任何基线字段。
+    started_detail: dict[str, Any] = {"metrics": keys}
+    if plan.enabled:
+        started_detail["baseline"] = plan.anchor()
+    log_audit(conn, "run.started", f"run:{run_id}", "ok", started_detail)
+    if plan.enabled:
+        log_audit(
+            conn, "baseline.aligned", f"run:{run_id}",
+            "ok" if plan.status == "ready" else "degraded",
+            {"anchor": plan.anchor(), "alignment": plan.alignment},
+        )
     summary = {verdict: 0 for verdict in VERDICTS}
     try:
         for key in keys:
@@ -185,11 +203,26 @@ def perform_run(
             summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id
+        if plan.enabled:
+            # 全量跑完后再定稿：两侧快照均已不可变，结论对并发/重跑确定。
+            summary["baseline_comparison"] = build_baseline_comparison(
+                conn, plan, run_id
+            )
         finish_run(conn, run_id, status="completed", summary=summary)
         log_audit(conn, "run.completed", f"run:{run_id}", "ok", summary)
         return run_id
     except Exception as exc:
-        finish_run(conn, run_id, status="failed", error=str(exc))
+        # 关闭对照时失败 summary 维持老形状（空对象由 finish_run 兜底为 {}）。
+        failure_summary: dict[str, Any] = {}
+        if plan.enabled:
+            failure_summary = {
+                "metrics": len(keys),
+                "run_id": run_id,
+                "baseline_comparison": failure_anchor(plan),
+            }
+        finish_run(
+            conn, run_id, status="failed", summary=failure_summary, error=str(exc)
+        )
         record_error(conn, "run.failed", f"run:{run_id}", exc, extra={"metrics": keys})
         if isinstance(exc, CaliberError):
             raise

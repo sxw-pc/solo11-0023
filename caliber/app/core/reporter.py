@@ -79,6 +79,54 @@ def _cell(value: Any) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
+def _baseline_badge(status: str) -> str:
+    return "已降级（无对照）" if status == "degraded" else "有效对照"
+
+
+def _render_baseline_markdown(run: dict[str, Any]) -> list[str]:
+    """渲染 runs.summary_json 中的基线对照扩展块；老 run 无此字段则不输出。"""
+    baseline = run.get("summary", {}).get("baseline_comparison")
+    if not baseline:
+        return []
+    lines = [
+        "## 批次基线对照",
+        "",
+        f"- 对照策略：`{baseline.get('strategy')}`（执行前结构对齐，全量跑完后定稿）",
+        f"- 基线选择：{baseline.get('baseline_selection')}，基线 run："
+        f"{baseline.get('baseline_run_id') if baseline.get('baseline_run_id') is not None else '无'}",
+        f"- 对照状态：{_baseline_badge(baseline.get('status', ''))}",
+        f"- 摘要：{baseline.get('summary_text', '')}",
+        "",
+    ]
+    if baseline.get("status") == "degraded":
+        lines.extend([
+            f"- 降级原因：`{baseline.get('degrade_reason')}`",
+            "",
+        ])
+        return lines
+    metrics = baseline.get("metrics", {})
+    if metrics:
+        lines.extend([
+            "| 指标 | 可比性 | 基线判定 | 本次判定 | 变化 | 不可比原因 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ])
+        for key in sorted(metrics):
+            item = metrics[key]
+            if item.get("comparable"):
+                lines.append(
+                    f"| `{key}` | 可比 | {item['baseline_verdict']} | "
+                    f"{item['current_verdict']} | {item['verdict_change']} | - |"
+                )
+            else:
+                lines.append(
+                    f"| `{key}` | 不可比 | {item.get('baseline_verdict', '缺失')} | "
+                    f"{item.get('current_verdict', '-')} | - | "
+                    f"{', '.join(item.get('reasons', []))} |"
+                )
+        lines.append("")
+    return lines
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     run = report["run"]
     summary = report["summary"]
@@ -99,9 +147,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| {summary['metric_count']} | {summary['consistent']} | "
         f"{summary['inconsistent']} | {summary['partial']} | {summary['drift_count']} |",
         "",
-        "## 指标明细",
-        "",
     ]
+    lines.extend(_render_baseline_markdown(run))
+    lines.extend(["## 指标明细", ""])
     for item in report["metrics"]:
         lines.extend(
             [
@@ -160,6 +208,52 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_baseline_html(run: dict[str, Any]) -> list[str]:
+    """渲染基线对照扩展块；老 run 无该扩展字段时不输出，报告结构保持不变。"""
+    baseline = run.get("summary", {}).get("baseline_comparison")
+    if not baseline:
+        return []
+    parts = [
+        "<h2>批次基线对照</h2>",
+        "<p class=\"meta\">"
+        f"策略 <code>{html.escape(str(baseline.get('strategy')))}</code> · "
+        f"选择方式 {html.escape(str(baseline.get('baseline_selection')))} · "
+        f"基线 run #{html.escape(str(baseline.get('baseline_run_id')))} · "
+        f"状态 {html.escape(_baseline_badge(baseline.get('status', '')))}"
+        "</p>",
+        f"<p>{html.escape(str(baseline.get('summary_text', '')))}</p>",
+    ]
+    if baseline.get("status") == "degraded":
+        parts.append(
+            f"<p class=\"meta\">降级原因：<code>{html.escape(str(baseline.get('degrade_reason')))}</code></p>"
+        )
+        return parts
+    metrics = baseline.get("metrics", {})
+    if metrics:
+        parts.append(
+            "<table><tr><th>指标</th><th>可比性</th><th>基线判定</th>"
+            "<th>本次判定</th><th>变化</th><th>不可比原因</th></tr>"
+        )
+        for key in sorted(metrics):
+            item = metrics[key]
+            if item.get("comparable"):
+                cells = (
+                    key, "可比", item["baseline_verdict"], item["current_verdict"],
+                    item["verdict_change"], "-",
+                )
+            else:
+                cells = (
+                    key, "不可比", item.get("baseline_verdict", "缺失"),
+                    item.get("current_verdict", "-"), "-",
+                    ", ".join(item.get("reasons", [])),
+                )
+            parts.append(
+                "<tr>" + "".join(f"<td>{html.escape(str(cell))}</td>" for cell in cells) + "</tr>"
+            )
+        parts.append("</table>")
+    return parts
+
+
 def render_html(report: dict[str, Any]) -> str:
     summary = report["summary"]
     parts = [
@@ -175,6 +269,7 @@ def render_html(report: dict[str, Any]) -> str:
         f"<p>指标 {summary['metric_count']} 个；consistent {summary['consistent']}，"
         f"inconsistent {summary['inconsistent']}，partial {summary['partial']}，"
         f"漂移 {summary['drift_count']}。</p>",
+        *_render_baseline_html(report["run"]),
         "<h2>指标明细</h2>",
     ]
     for item in report["metrics"]:

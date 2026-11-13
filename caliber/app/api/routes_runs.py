@@ -34,6 +34,20 @@ def _tolerance(payload: dict[str, Any], name: str, default: float) -> float:
     return result
 
 
+def _baseline_options(payload: dict[str, Any]) -> tuple[int | None, bool]:
+    raw_id = payload.get("baseline_run_id")
+    baseline_run_id: int | None = None
+    if raw_id is not None:
+        try:
+            baseline_run_id = int(raw_id)
+        except (TypeError, ValueError) as exc:
+            raise CaliberError("baseline_run_id 必须是整数") from exc
+    if "compare_baseline" in payload and not isinstance(payload["compare_baseline"], bool):
+        raise CaliberError("compare_baseline 必须是布尔值")
+    compare_baseline = bool(payload.get("compare_baseline", True))
+    return baseline_run_id, compare_baseline
+
+
 @bp.post("")
 def create_run():
     payload = request.get_json(silent=True)
@@ -43,6 +57,7 @@ def create_run():
         raise CaliberError("请求体必须是 JSON 对象")
     config = current_app.config["CALIBER"]
     keys = _metric_keys(payload)
+    baseline_run_id, compare_baseline = _baseline_options(payload)
     datasets_dir = Path(payload.get("datasets_dir") or config.datasets_dir).expanduser().resolve()
     catalog = load_catalog(datasets_dir)
     try:
@@ -56,6 +71,8 @@ def create_run():
             max_rows=config.max_result_rows,
             abs_tolerance=_tolerance(payload, "abs", config.abs_tolerance),
             rel_tolerance=_tolerance(payload, "rel", config.rel_tolerance),
+            baseline_run_id=baseline_run_id,
+            compare_baseline=compare_baseline,
         )
     finally:
         catalog.close()

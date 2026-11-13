@@ -38,6 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--datasets", type=Path, help="CSV 数据集目录")
     run.add_argument("--abs-tol", type=float, default=None, help="绝对容差")
     run.add_argument("--rel-tol", type=float, default=None, help="相对容差")
+    run.add_argument(
+        "--baseline-run-id", type=int, default=None,
+        help="指定基线 run ID；省略时自动选取上一个同指标集合的已完成 run",
+    )
+    run.add_argument(
+        "--no-baseline-compare", action="store_true",
+        help="关闭批次基线对照，行为与不启用对照时完全一致",
+    )
     run.set_defaults(handler=_run)
 
     report = sub.add_parser("report", help="导出比对报告")
@@ -103,11 +111,16 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
             max_rows=config.max_result_rows,
             abs_tolerance=config.abs_tolerance if args.abs_tol is None else args.abs_tol,
             rel_tolerance=config.rel_tolerance if args.rel_tol is None else args.rel_tol,
+            baseline_run_id=args.baseline_run_id,
+            compare_baseline=not args.no_baseline_compare,
         )
     finally:
         catalog.close()
     run = get_run(conn, run_id)
     print(f"运行 #{run_id} 完成：{json.dumps(run['summary'], ensure_ascii=False)}")
+    baseline_comparison = run["summary"].get("baseline_comparison")
+    if baseline_comparison is not None:
+        print(f"基线对照：{baseline_comparison['summary_text']}")
     for snapshot in snapshots_for_run(conn, run_id):
         print(f"- {snapshot['metric_key']} v{snapshot['metric_version']}: {snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})")
     print(f"导出报告: python -m app report --run-id {run_id} --format md")
