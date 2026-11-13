@@ -1,0 +1,12 @@
+{
+  "artifact_version": "1.0",
+  "rules": [
+    {
+      "rule_key": "amount_nonnegative",
+      "name": "金额非负",
+      "datasets": [
+        {"dataset": "orders_a", "hits": 1180, "passes": 1180}
+      ]
+    }
+  ]
+}

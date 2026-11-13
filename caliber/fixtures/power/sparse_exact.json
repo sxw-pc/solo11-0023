@@ -1,0 +1,13 @@
+{
+  "artifact_version": "1.0",
+  "records": [
+    {"rule_key": "refund_null_ratio", "dataset": "orders_a",
+     "hits": 0, "passes": 4000, "total": 4000},
+    {"rule_key": "refund_null_ratio", "dataset": "orders_b",
+     "hits": 3, "passes": 3997, "total": 4000},
+    {"rule_key": "coupon_orphan_ratio", "dataset": "orders_a",
+     "hits": 1, "passes": 3999, "total": 4000},
+    {"rule_key": "coupon_orphan_ratio", "dataset": "orders_b",
+     "hits": 2, "passes": 3998, "total": 4000}
+  ]
+}

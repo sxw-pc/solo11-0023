@@ -1,0 +1,19 @@
+{
+  "artifact_version": "1.0",
+  "rules": [
+    {
+      "rule_key": "amount_nonnegative",
+      "name": "金额非负",
+      "datasets": [
+        {"dataset": "orders_a", "hits": 1180, "passes": 820, "total": 2000}
+      ]
+    },
+    {
+      "rule_key": "channel_known",
+      "name": "渠道已登记",
+      "datasets": [
+        {"dataset": "orders_a", "hits": 810, "passes": 1190, "total": 2000}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "artifact_version": "1.0",
+  "rules": [
+    {
+      "rule_key": "amount_positive",
+      "name": "金额为正",
+      "datasets": [
+        {"dataset": "orders_solo", "hits": 1120, "passes": 880, "total": 2000}
+      ]
+    }
+  ]
+}

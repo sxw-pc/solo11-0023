@@ -1,0 +1,19 @@
+{
+  "artifact_version": "1.0",
+  "rules": [
+    {
+      "rule_key": "refund_flag_ratio",
+      "name": "退款标记比例",
+      "datasets": [
+        {"dataset": "noise_a", "hits": 1205, "passes": 795, "total": 2000}
+      ]
+    },
+    {
+      "rule_key": "discount_flag_ratio",
+      "name": "折扣标记比例",
+      "datasets": [
+        {"dataset": "noise_a", "hits": 856, "passes": 1144, "total": 2000}
+      ]
+    }
+  ]
+}

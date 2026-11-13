@@ -21,6 +21,7 @@ test = [
 
 [project.scripts]
 caliber = "cli.main:main"
+caliber-power = "app.power.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["app*", "cli*"]
