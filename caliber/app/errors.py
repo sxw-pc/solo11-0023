@@ -69,6 +69,44 @@ class EvaluationTimeout(EvaluationError):
     code = "evaluation_timeout"
 
 
+class EvaluationRowLimit(EvaluationError):
+    """Row cap hit.
+
+    ``observed_rows`` is the number of rows actually read before evaluation
+    stopped.  ``row_count_exact`` is false when the remaining rows could not
+    be drained (for example because the metric-level timeout expired during
+    counting), in which case ``observed_rows`` is a lower bound.
+    """
+
+    code = "row_limit_exceeded"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        impl_id: str,
+        max_rows: int,
+        observed_rows: int,
+        row_count_exact: bool,
+        elapsed_ms: float = 0.0,
+    ) -> None:
+        super().__init__(
+            message,
+            details={
+                "impl_id": impl_id,
+                "max_rows": int(max_rows),
+                "observed_rows": int(observed_rows),
+                "row_count_exact": bool(row_count_exact),
+                "elapsed_ms": round(float(elapsed_ms), 3),
+            },
+        )
+        self.impl_id = impl_id
+        self.max_rows = int(max_rows)
+        self.observed_rows = int(observed_rows)
+        self.row_count_exact = bool(row_count_exact)
+        self.elapsed_ms = float(elapsed_ms)
+
+
 class ReportError(CaliberError):
     code = "report_error"
 

@@ -36,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="执行多实现一致性比对")
     run.add_argument("--metrics", help="逗号分隔的指标 key；省略表示全部")
     run.add_argument("--datasets", type=Path, help="CSV 数据集目录")
+    run.add_argument("--timeout", type=float, default=None, help="单实现求值超时秒数")
+    run.add_argument("--max-rows", type=int, default=None, help="单实现结果行数上限")
     run.add_argument("--abs-tol", type=float, default=None, help="绝对容差")
     run.add_argument("--rel-tol", type=float, default=None, help="相对容差")
     run.set_defaults(handler=_run)
@@ -91,6 +93,12 @@ def _import_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Conn
 def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
     datasets_dir = (args.datasets or config.datasets_dir).expanduser().resolve()
     keys = [item.strip() for item in args.metrics.split(",") if item.strip()] if args.metrics else None
+    timeout_seconds = args.timeout if args.timeout is not None else config.eval_timeout_seconds
+    max_rows = args.max_rows if args.max_rows is not None else config.max_result_rows
+    if timeout_seconds <= 0:
+        raise CaliberError("--timeout 必须是正数")
+    if max_rows < 1:
+        raise CaliberError("--max-rows 必须大于 0")
     catalog = load_catalog(datasets_dir)
     try:
         run_id = perform_run(
@@ -99,18 +107,44 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
             catalog,
             config.sql_roots,
             datasets_dir=datasets_dir,
-            timeout_seconds=config.eval_timeout_seconds,
-            max_rows=config.max_result_rows,
+            timeout_seconds=timeout_seconds,
+            max_rows=max_rows,
             abs_tolerance=config.abs_tolerance if args.abs_tol is None else args.abs_tol,
             rel_tolerance=config.rel_tolerance if args.rel_tol is None else args.rel_tol,
         )
     finally:
         catalog.close()
     run = get_run(conn, run_id)
-    print(f"运行 #{run_id} 完成：{json.dumps(run['summary'], ensure_ascii=False)}")
+    summary = run["summary"]
+    print(f"运行 #{run_id} 完成：{json.dumps(summary, ensure_ascii=False)}")
+    print(
+        "计数："
+        f"正常 {summary.get('completed', 0)} / "
+        f"超时降级 {summary.get('degraded_timeout', 0)} / "
+        f"截断降级 {summary.get('degraded_row_limit', 0)}"
+    )
     for snapshot in snapshots_for_run(conn, run_id):
-        print(f"- {snapshot['metric_key']} v{snapshot['metric_version']}: {snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})")
+        line = (
+            f"- {snapshot['metric_key']} v{snapshot['metric_version']}: "
+            f"{snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})"
+        )
+        if snapshot["verdict"] == "degraded":
+            degradation = snapshot["result"].get("degraded") or {}
+            reason = "超时" if degradation.get("reason") == "timeout" else "行数截断"
+            line += (
+                f" [降级/{reason}] 实现={degradation.get('failed_impl_id')}"
+                f" 原因={degradation.get('message', '')}"
+            )
+            if degradation.get("reason") == "row_limit":
+                line += (
+                    f" 实际行数={degradation.get('observed_rows')}"
+                    f" 上限={degradation.get('max_rows')}"
+                    f" 精确={degradation.get('row_count_exact')}"
+                )
+        print(line)
     print(f"导出报告: python -m app report --run-id {run_id} --format md")
+    # A run with only degraded metrics is still successful; hard failures
+    # raise out of perform_run and are handled by the CLI boundary as exit 1.
     return 0
 
 

@@ -104,7 +104,7 @@ SQL 约定：
 - 只允许单条 `SELECT` 或 `WITH ... SELECT` 查询。
 - 返回 1 列（数值）或 2 列（维度, 数值）。单列聚合结果的维度为 `__all__`。
 - 维度值在 `grain=day/week/month` 下按 ISO 日期截断；非日期维度原样保留。
-- 同一查询不得返回重复维度；结果行数默认不超过 10,000。
+- 同一查询不得返回重复维度；结果行数默认不超过 10,000（按实现独立生效，可用 `--max-rows` 调整，超限记为行数截断降级）。
 - 指标值必须是数值；空值、字符串、布尔值会得到明确的求值错误。
 
 校验器会检查 key 格式、粒度枚举、至少两个实现、实现 ID 重复、SQL 文件存在性及路径白名单。错误以字段级列表返回。
@@ -126,6 +126,39 @@ SQL 约定：
 - `partial`：不存在数值超差，但至少一个实现缺少某个维度。
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
+
+### 4.1 批内降级（超时 / 行数截断）
+
+求值超时（默认 5 秒）与结果行数上限（默认 10,000 行）**按每条指标的每个实现独立生效**，而不是整批共享。某条指标触发限制时只把该指标标记为降级，批内其余指标继续执行：
+
+- `timeout`：实现查询在截止时间被真正打断（SQLite progress handler 触发 `interrupt`），快照记录超时阈值与失败实现。
+- `row_limit`：结果超过上限后显式排空游标，记录**截断前的实际行数**与上限值；若排空过程本身超时，`row_count_exact` 为 `false`，此时实际行数是下界。
+
+每条指标求值结束（无论成功或降级）都会回滚事务、关闭游标并清除 progress handler，复用的只读连接不会残留悬挂状态。
+
+**降级快照策略（显式选择：落库并打标）**：降级指标仍写入一条 `verdict = "degraded"` 的快照，使报告与看板能展示该指标被尝试过；但该行不包含任何比对结论。下游做一致性汇总时必须先排除降级行，识别方式（同时写入 `runs.summary_json.execution.degradation.downstream_detection`）：
+
+- `snapshot.verdict == "degraded"`
+- `snapshot.summary.degraded == true`
+- `snapshot.result.degraded`（含 `reason`、`failed_impl_id`、`max_rows`、`observed_rows`、`row_count_exact`、`timeout_seconds`）
+- `snapshot.summary.degraded_reason in {"timeout", "row_limit"}`
+
+snapshots 表字段结构保持不变，降级标记只存在于既有的 `summary_json` / `result_json` 内，老报告读取方式不受影响。降级快照不参与漂移检测。
+
+`runs.summary_json` 的计数：
+
+| 字段 | 含义 |
+| --- | --- |
+| `consistent` / `inconsistent` / `partial` | 正常完成指标的判定计数 |
+| `completed` | 正常完成指标数（= 上述三项之和） |
+| `degraded_timeout` | 超时降级数 |
+| `degraded_row_limit` | 行数截断降级数 |
+| `degraded` | 降级总数 |
+| `degraded_metrics` | 逐条降级明细（key、版本、原因、失败实现、消息） |
+| `execution` | 限制作用域与降级策略、下游识别方式 |
+| `failed` | 硬失败数（仅 `RunError` 路径非零） |
+
+只有降级、没有硬失败时，run 状态仍为 `completed`，CLI 退出码为 `0`；CLI 会在输出中逐条打印降级指标及其原因。`--timeout` 与 `--max-rows` 可覆盖默认限制。
 
 ## 5. 目录结构
 
