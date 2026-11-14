@@ -115,10 +115,72 @@ def test_run_metric_on_fixtures(
     catalog: DatasetCatalog, fixture_tree: Path, sql_roots: tuple[Path, ...]
 ):
     metric = parse_metric_file(fixture_tree / "metrics" / "active_users.yaml")
-    evaluations = evaluate_metric_impls(metric, 1, catalog, sql_roots)
+    evaluations, skipped = evaluate_metric_impls(metric, 1, catalog, sql_roots)
+    assert not skipped
     assert set(evaluations) == {"impl_a", "impl_b"}
     assert evaluations["impl_a"].values == evaluations["impl_b"].values
     assert evaluations["impl_a"].duration_ms >= 0
-    comparison, _ = run_metric(metric, 1, catalog, sql_roots)
+    comparison, _, skipped = run_metric(metric, 1, catalog, sql_roots)
+    assert not skipped
     assert comparison.verdict == "consistent"
+
+
+def test_missing_dataset_marks_impl_unevaluable_without_aborting(
+    catalog: DatasetCatalog, fixture_tree: Path, sql_roots: tuple[Path, ...]
+):
+    metric = parse_metric_file(fixture_tree / "metrics" / "active_users.yaml")
+    # Simulate impl_b's dataset having been removed from the catalog.
+    del catalog.datasets["users_b"]
+    catalog._by_name.pop("users_b", None)
+    evaluations, skipped = evaluate_metric_impls(metric, 1, catalog, sql_roots)
+    assert set(evaluations) == {"impl_a"}
+    assert len(skipped) == 1
+    assert skipped[0]["impl_id"] == "impl_b"
+    assert "users_b.csv" in skipped[0]["reason"]
+
+    comparison, evals, skipped_again = run_metric(metric, 1, catalog, sql_roots)
+    assert comparison.verdict == "unevaluable"
+    assert comparison.summary["unevaluable"] is True
+    assert skipped_again == skipped
+    assert set(evals) == {"impl_a"}
+
+
+def test_all_datasets_missing_produces_empty_unevaluable_result(
+    catalog: DatasetCatalog, fixture_tree: Path, sql_roots: tuple[Path, ...]
+):
+    metric = parse_metric_file(fixture_tree / "metrics" / "active_users.yaml")
+    for key in ("users_a", "users_b"):
+        catalog.datasets.pop(key, None)
+        catalog._by_name.pop(key, None)
+    comparison, evaluations, skipped = run_metric(metric, 1, catalog, sql_roots)
+    assert not evaluations
+    assert comparison.verdict == "unevaluable"
+    assert comparison.dimensions == [] and comparison.diffs == []
+    assert {item["impl_id"] for item in skipped} == {"impl_a", "impl_b"}
+    assert all(".csv" in item["reason"] for item in skipped)
+
+
+def test_ambiguous_bare_stem_is_reported_with_candidate_paths(
+    tmp_path: Path, fixture_tree: Path, sql_roots: tuple[Path, ...]
+):
+    directory = tmp_path / "datasets"
+    directory.mkdir()
+    for sub in ("x", "y"):
+        target = directory / sub
+        target.mkdir()
+        (target / "users_b.csv").write_text(
+            (fixture_tree / "datasets" / "users_b.csv").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    catalog = DatasetCatalog(directory)
+    try:
+        metric = parse_metric_file(fixture_tree / "metrics" / "active_users.yaml")
+        _, skipped = evaluate_metric_impls(metric, 1, catalog, sql_roots)
+        # Both impls reference names that are ambiguous or absent here.
+        assert skipped
+        reasons = " ".join(item["reason"] for item in skipped)
+        assert "重名文件" in reasons
+        assert "x/users_b.csv" in reasons and "y/users_b.csv" in reasons
+    finally:
+        catalog.close()
 

@@ -18,7 +18,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     run = get_run(conn, run_id)
     snapshots = snapshots_for_run(conn, run_id)
     metrics: list[dict[str, Any]] = []
-    counts = {"consistent": 0, "inconsistent": 0, "partial": 0}
+    counts = {"consistent": 0, "inconsistent": 0, "partial": 0, "unevaluable": 0}
     keys: set[str] = set()
     for snapshot in snapshots:
         result = snapshot["result"]
@@ -36,12 +36,14 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
                 "grain": definition.get("grain", ""),
                 "version": snapshot["metric_version"],
                 "verdict": snapshot["verdict"],
+                # Frozen list from the snapshot; never re-scanned from disk.
                 "datasets": snapshot["datasets"],
                 "impl_ids": snapshot["impl_ids"],
                 "summary": snapshot["summary"],
                 "dimensions": result.get("dimensions", []),
                 "diffs": result.get("diffs", []),
                 "implementations": result.get("implementations", []),
+                "unevaluable_impls": result.get("unevaluable_impls", []),
                 "tolerances": {
                     "abs": result.get("abs_tolerance"),
                     "rel": result.get("rel_tolerance"),
@@ -56,6 +58,8 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         "report_version": "1.0",
         "generated_at": utc_now(),
         "run": run,
+        # Run-level dataset manifest, frozen when the run was created.
+        "datasets_manifest": run.get("datasets_manifest", []),
         "summary": {
             "metric_count": len(metrics),
             **counts,
@@ -79,6 +83,17 @@ def _cell(value: Any) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
+def _dataset_labels(datasets: list[dict[str, Any]]) -> list[str]:
+    labels: list[str] = []
+    for item in datasets:
+        label = item.get("rel_path") or item.get("name") or item.get("key", "")
+        note = item.get("note")
+        if note:
+            label = f"{label}（{note}）"
+        labels.append(label)
+    return labels
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     run = report["run"]
     summary = report["summary"]
@@ -90,14 +105,17 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- 开始时间：{run['started_at']}",
         f"- 结束时间：{run.get('finished_at') or '-'}",
         f"- 数据集目录：`{run['datasets_dir']}`",
+        "- 本次运行数据集清单（以快照落库为准）："
+        + (", ".join(_dataset_labels(report["datasets_manifest"])) or "（空）"),
         f"- 容差：绝对 {run['tolerances'].get('abs')} / 相对 {run['tolerances'].get('rel')}",
         "",
         "## 总览",
         "",
-        "| 指标数 | consistent | inconsistent | partial | 漂移事件 |",
-        "| --- | --- | --- | --- | --- |",
+        "| 指标数 | consistent | inconsistent | partial | unevaluable | 漂移事件 |",
+        "| --- | --- | --- | --- | --- | --- |",
         f"| {summary['metric_count']} | {summary['consistent']} | "
-        f"{summary['inconsistent']} | {summary['partial']} | {summary['drift_count']} |",
+        f"{summary['inconsistent']} | {summary['partial']} | "
+        f"{summary.get('unevaluable', 0)} | {summary['drift_count']} |",
         "",
         "## 指标明细",
         "",
@@ -110,9 +128,22 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"- 判定：**{item['verdict']}**",
                 f"- 负责人：{item['owner']}",
                 f"- 单位 / 粒度：{item['unit']} / {item['grain']}",
-                f"- 数据集：{', '.join(item['datasets'])}",
+                f"- 数据集：{', '.join(_dataset_labels(item['datasets'])) or '（无可用数据集）'}",
                 f"- 维度数：{item['summary'].get('dimension_count', 0)}",
                 "",
+            ]
+        )
+        if item["verdict"] == "unevaluable":
+            lines.append("> 该指标存在不可评估的实现，未参与一致性判定：")
+            lines.append("")
+            for blocked in item["unevaluable_impls"]:
+                lines.append(
+                    f"> - 实现 `{blocked['impl_id']}` 引用数据集 "
+                    f"`{blocked['source']}`：{blocked['reason']}"
+                )
+            lines.append("")
+        lines.extend(
+            [
                 "| 实现 | 数据集 | 行数 | 耗时(ms) |",
                 "| --- | --- | --- | --- |",
             ]
@@ -168,13 +199,18 @@ def render_html(report: dict[str, Any]) -> str:
         "<title>指标准星一致性报告</title><style>",
         "body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;max-width:1080px;margin:32px auto;padding:0 20px;color:#17212b;background:#f7f9fc;line-height:1.6}",
         "h1,h2,h3{color:#0f3d5c}table{border-collapse:collapse;width:100%;background:#fff;margin:12px 0}th,td{border:1px solid #d7e0e8;padding:7px 9px;text-align:left}",
-        "th{background:#eaf2f8}.verdict{font-weight:700;padding:2px 8px;border-radius:4px}.consistent{background:#d9f2e2}.inconsistent{background:#f8d7da}.partial{background:#fff0c2}.meta{color:#52606d}code{background:#edf2f7;padding:1px 4px}",
+        "th{background:#eaf2f8}.verdict{font-weight:700;padding:2px 8px;border-radius:4px}.consistent{background:#d9f2e2}.inconsistent{background:#f8d7da}.partial{background:#fff0c2}.unevaluable{background:#e2e3e5;color:#41464b}.meta{color:#52606d}code{background:#edf2f7;padding:1px 4px}",
+        "blockquote{border-left:4px solid #b0b7be;background:#fff;padding:8px 12px;margin:12px 0}",
         "</style></head><body>",
         "<h1>指标准星一致性报告</h1>",
         f"<p class=\"meta\">运行 #{report['run']['id']} · {html.escape(report['generated_at'])}</p>",
         f"<p>指标 {summary['metric_count']} 个；consistent {summary['consistent']}，"
         f"inconsistent {summary['inconsistent']}，partial {summary['partial']}，"
+        f"unevaluable {summary.get('unevaluable', 0)}，"
         f"漂移 {summary['drift_count']}。</p>",
+        "<p class=\"meta\">本次运行数据集清单（以快照落库为准）："
+        + html.escape(", ".join(_dataset_labels(report["datasets_manifest"])) or "（空）")
+        + "</p>",
         "<h2>指标明细</h2>",
     ]
     for item in report["metrics"]:
@@ -186,8 +222,23 @@ def render_html(report: dict[str, Any]) -> str:
         parts.append(
             f"<p class=\"meta\">负责人 {html.escape(item['owner'])} · 单位 "
             f"{html.escape(item['unit'])} · 粒度 {html.escape(item['grain'])} · 数据集 "
-            f"{html.escape(', '.join(item['datasets']))}</p>"
+            f"{html.escape(', '.join(_dataset_labels(item['datasets'])) or '（无可用数据集）')}</p>"
         )
+        if verdict == "unevaluable":
+            parts.append(
+                "<blockquote>该指标存在不可评估的实现，未参与一致性判定：<ul>"
+            )
+            for blocked in item["unevaluable_impls"]:
+                parts.append(
+                    "<li>实现 <code>"
+                    + html.escape(str(blocked["impl_id"]))
+                    + "</code> 引用数据集 <code>"
+                    + html.escape(str(blocked["source"]))
+                    + "</code>："
+                    + html.escape(str(blocked["reason"]))
+                    + "</li>"
+                )
+            parts.append("</ul></blockquote>")
         parts.append("<table><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th></tr>")
         for impl in item["implementations"]:
             parts.append(

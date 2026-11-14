@@ -109,7 +109,16 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
     run = get_run(conn, run_id)
     print(f"运行 #{run_id} 完成：{json.dumps(run['summary'], ensure_ascii=False)}")
     for snapshot in snapshots_for_run(conn, run_id):
-        print(f"- {snapshot['metric_key']} v{snapshot['metric_version']}: {snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})")
+        print(
+            f"- {snapshot['metric_key']} v{snapshot['metric_version']}: "
+            f"{snapshot['verdict']} (diff={snapshot['summary'].get('diff_count', 0)})"
+        )
+        for blocked in snapshot["result"].get("unevaluable_impls", []):
+            print(
+                f"  不可评估: 实现 {blocked['impl_id']} 引用数据集 "
+                f"{blocked['source']} -> {blocked['reason']}",
+                file=sys.stderr,
+            )
     print(f"导出报告: python -m app report --run-id {run_id} --format md")
     return 0
 

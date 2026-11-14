@@ -4,6 +4,7 @@ from __future__ import annotations
 from flask import Blueprint, current_app, jsonify, request
 
 from ..core.dataset_loader import load_catalog
+from ..errors import NotFoundError
 
 bp = Blueprint("api_datasets", __name__, url_prefix="/api/datasets")
 
@@ -27,10 +28,21 @@ def list_datasets():
 def get_dataset(key: str):
     catalog = _catalog()
     try:
-        meta = catalog.require(key).to_dict()
+        meta = catalog.resolve(key)
+        if meta is None:
+            ambiguous = catalog.ambiguity(key)
+            if ambiguous:
+                message = (
+                    f"数据集名称 {key} 存在重名文件，请改用完整 key 访问: "
+                    + ", ".join(item.key for item in ambiguous)
+                )
+            else:
+                message = f"数据集不存在: {key}"
+            raise NotFoundError(message)
+        payload = meta.to_dict()
     finally:
         catalog.close()
-    return jsonify({"dataset": meta})
+    return jsonify({"dataset": payload})
 
 
 @bp.get("/<key>/preview")
@@ -41,7 +53,8 @@ def preview_dataset(key: str):
         return jsonify({"error": "invalid_query", "message": "limit 必须是整数"}), 400
     catalog = _catalog()
     try:
-        payload = catalog.preview(key, limit)
+        meta = catalog.require(key)
+        payload = catalog.preview(meta.key, limit)
     finally:
         catalog.close()
     return jsonify(payload)

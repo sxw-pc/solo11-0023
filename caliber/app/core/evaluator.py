@@ -191,11 +191,33 @@ def evaluate_metric_impls(
     *,
     timeout_seconds: float = 5.0,
     max_rows: int = 10_000,
-) -> dict[str, ImplEvaluation]:
+) -> tuple[dict[str, ImplEvaluation], list[dict[str, str]]]:
+    """Evaluate every implementation.
+
+    Returns the successful evaluations plus a list of unevaluable
+    implementations; each entry carries the implementation id, the dataset
+    reference it needs and a human-readable reason. A missing dataset never
+    aborts the whole run.
+    """
     results: dict[str, ImplEvaluation] = {}
+    skipped: list[dict[str, str]] = []
     conn = catalog.readonly_connection()
     for impl in metric.impls:
-        catalog.require(impl.source)
+        meta = catalog.resolve(impl.source)
+        if meta is None:
+            ambiguous = catalog.ambiguity(impl.source)
+            if ambiguous:
+                locations = ", ".join(item.rel_path for item in ambiguous)
+                reason = (
+                    f"数据集名称 {impl.source} 在多个子目录下存在重名文件"
+                    f"（{locations}），请在指标定义中改用完整数据集 key"
+                )
+            else:
+                reason = f"数据集缺失: {impl.source}.csv 不在数据集目录中"
+            skipped.append(
+                {"impl_id": impl.id, "source": impl.source, "reason": reason}
+            )
+            continue
         sql_path = resolve_sql_path(impl.sql_file, sql_roots)
         try:
             sql = sql_path.read_text(encoding="utf-8-sig")
@@ -211,13 +233,47 @@ def evaluate_metric_impls(
         )
         results[impl.id] = ImplEvaluation(
             impl_id=impl.id,
-            source=impl.source,
+            source=meta.key,
             sql_file=impl.sql_file,
             values=values,
             row_count=row_count,
             duration_ms=round(duration, 3),
         )
-    return results
+    return results, skipped
+
+
+def unevaluable_result(
+    metric: MetricDefinition,
+    version: int,
+    skipped: list[dict[str, str]],
+    *,
+    abs_tolerance: float = 1e-6,
+    rel_tolerance: float = 0.0,
+) -> ComparisonResult:
+    """Build a degraded comparison result for metrics blocked by missing data."""
+    impl_ids = [item["impl_id"] for item in skipped]
+    reasons = [f"{item['impl_id']}: {item['reason']}" for item in skipped]
+    summary = {
+        "impl_count": len(impl_ids),
+        "dimension_count": 0,
+        "consistent_dimensions": 0,
+        "value_mismatches": 0,
+        "missing_dimensions": 0,
+        "diff_count": 0,
+        "unevaluable": True,
+        "unevaluable_reasons": reasons,
+    }
+    return ComparisonResult(
+        metric_key=metric.key,
+        metric_version=int(version),
+        impl_ids=impl_ids,
+        verdict="unevaluable",
+        dimensions=[],
+        diffs=[],
+        summary=summary,
+        abs_tolerance=float(abs_tolerance),
+        rel_tolerance=float(rel_tolerance),
+    )
 
 
 def run_metric(
@@ -230,8 +286,8 @@ def run_metric(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
-) -> tuple[ComparisonResult, dict[str, ImplEvaluation]]:
-    evaluations = evaluate_metric_impls(
+) -> tuple[ComparisonResult, dict[str, ImplEvaluation], list[dict[str, str]]]:
+    evaluations, skipped = evaluate_metric_impls(
         metric,
         version,
         catalog,
@@ -239,6 +295,15 @@ def run_metric(
         timeout_seconds=timeout_seconds,
         max_rows=max_rows,
     )
+    if not evaluations:
+        comparison = unevaluable_result(
+            metric,
+            version,
+            skipped,
+            abs_tolerance=abs_tolerance,
+            rel_tolerance=rel_tolerance,
+        )
+        return comparison, evaluations, skipped
     comparison = compare_impl_results(
         {impl_id: item.values for impl_id, item in evaluations.items()},
         metric_key=metric.key,
@@ -246,4 +311,10 @@ def run_metric(
         abs_tolerance=abs_tolerance,
         rel_tolerance=rel_tolerance,
     )
-    return comparison, evaluations
+    if skipped:
+        comparison.verdict = "unevaluable"
+        comparison.summary["unevaluable"] = True
+        comparison.summary["unevaluable_reasons"] = [
+            f"{item['impl_id']}: {item['reason']}" for item in skipped
+        ]
+    return comparison, evaluations, skipped

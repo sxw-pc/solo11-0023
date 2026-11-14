@@ -33,8 +33,36 @@
     <div class="stat good"><span class="num">{{ report.summary.consistent }}</span><span>consistent</span></div>
     <div class="stat bad"><span class="num">{{ report.summary.inconsistent }}</span><span>inconsistent</span></div>
     <div class="stat warn"><span class="num">{{ report.summary.partial }}</span><span>partial</span></div>
+    <div class="stat"><span class="num">{{ report.summary.unevaluable }}</span><span>unevaluable</span></div>
     <div class="stat"><span class="num">{{ report.summary.drift_count }}</span><span>漂移事件</span></div>
   </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>本次运行数据集清单</h2><span class="muted">以快照落库为准 · {{ report.datasets_manifest | length }} 个</span></div>
+    {% if report.datasets_manifest %}
+    <table>
+      <thead><tr><th>数据集 key</th><th>文件名</th><th>相对路径</th><th>备注</th></tr></thead>
+      <tbody>
+      {% for ds in report.datasets_manifest %}
+        <tr>
+          <td><code>{{ ds.key }}</code></td>
+          <td>{{ ds.name }}</td>
+          <td class="mono">{{ ds.rel_path }}</td>
+          <td class="muted">{{ ds.note or '-' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty"><p>本次运行未记录数据集清单（旧版运行记录）。</p></div>
+    {% endif %}
+  </section>
+
+  {% macro dataset_labels(refs) -%}
+  {%- for ds in refs -%}
+  {{- ds.rel_path -}}{% if ds.note %}（{{ ds.note }}）{% endif %}{% if not loop.last %}, {% endif %}
+  {%- endfor -%}
+  {%- endmacro %}
 
   {% for item in report.metrics %}
   <section class="panel metric-report">
@@ -44,16 +72,26 @@
     </div>
     <p class="muted">{{ item.description }} · 负责人 {{ item.owner }} · 单位 {{ item.unit }} · 粒度 {{ item.grain }}</p>
     <div class="report-meta">
-      <span>数据集：{{ item.datasets | join(', ') }}</span>
+      <span>数据集：{{ dataset_labels(item.datasets) or '（无可用数据集）' }}</span>
       <span>维度：{{ item.summary.dimension_count }}</span>
       <span>差异：{{ item.summary.diff_count }}</span>
       <span>容差：abs {{ item.tolerances.abs }} / rel {{ item.tolerances.rel }}</span>
     </div>
+    {% if item.verdict == 'unevaluable' %}
+    <div class="unevaluable-note">
+      <strong>该指标存在不可评估的实现，未参与一致性判定：</strong>
+      <ul>
+        {% for blocked in item.unevaluable_impls %}
+        <li>实现 <code>{{ blocked.impl_id }}</code> 引用数据集 <code>{{ blocked.source }}</code>：{{ blocked.reason }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
     <table>
       <thead><tr><th>实现</th><th>数据集</th><th>行数</th><th>耗时(ms)</th></tr></thead>
       <tbody>
       {% for impl in item.implementations %}
-        <tr><td><strong>{{ impl.impl_id }}</strong></td><td>{{ impl.source }}</td><td>{{ impl.row_count }}</td><td>{{ impl.duration_ms }}</td></tr>
+        <tr><td><strong>{{ impl.impl_id }}</strong></td><td><code>{{ impl.source }}</code></td><td>{{ impl.row_count }}</td><td>{{ impl.duration_ms }}</td></tr>
       {% endfor %}
       </tbody>
     </table>
@@ -69,7 +107,7 @@
           <td><code>{{ diff.dimension }}</code></td>
           <td><span class="pill {{ 'inconsistent' if diff.kind == 'value_mismatch' else 'partial' }}">{{ diff.kind }}</span></td>
           {% for impl_id in item.impl_ids %}
-            <td>{% set value = diff.values.get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
+            <td>{% set value = diff['values'].get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
           {% endfor %}
           <td>{% if diff.max_delta is none %}-{% else %}{{ "%.6g" | format(diff.max_delta) }}{% endif %}</td>
         </tr>

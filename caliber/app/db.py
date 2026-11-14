@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS runs (
     datasets_dir TEXT NOT NULL,
     tolerances_json TEXT NOT NULL,
     summary_json TEXT NOT NULL DEFAULT '{}',
+    datasets_manifest_json TEXT NOT NULL DEFAULT '[]',
     error TEXT
 );
 
@@ -84,8 +85,21 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 def init_db(db_path: str | Path) -> sqlite3.Connection:
     conn = connect(db_path)
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive migrations for repositories created by older versions."""
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+    }
+    if "datasets_manifest_json" not in columns:
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN datasets_manifest_json "
+            "TEXT NOT NULL DEFAULT '[]'"
+        )
 
 
 def table_counts(conn: sqlite3.Connection) -> dict[str, int]:

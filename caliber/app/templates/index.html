@@ -81,11 +81,12 @@
     <div class="panel-head"><h2>本地数据集</h2><span class="muted">CSV → 内存 SQLite</span></div>
     {% if datasets %}
     <table>
-      <thead><tr><th>数据集</th><th>行数</th><th>列数</th><th>编码</th><th>列类型</th></tr></thead>
+      <thead><tr><th>数据集</th><th>相对路径</th><th>行数</th><th>列数</th><th>编码</th><th>列类型</th></tr></thead>
       <tbody>
       {% for item in datasets %}
         <tr>
-          <td><strong>{{ item.key }}</strong></td>
+          <td><strong>{{ item.key }}</strong><small>{{ item.name }}</small></td>
+          <td class="mono">{{ item.rel_path }}</td>
           <td>{{ item.row_count }}</td>
           <td>{{ item.column_count }}</td>
           <td>{{ item.encoding }}</td>

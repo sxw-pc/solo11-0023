@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -94,9 +95,25 @@ class DatasetMeta:
     row_count: int
     column_count: int
     columns: list[DatasetColumn]
+    name: str = ""
+    rel_path: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            self.name = Path(self.path).stem
+        if not self.rel_path:
+            self.rel_path = self.name + ".csv"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def reference(self) -> dict[str, Any]:
+        """Stable dataset reference persisted in snapshots."""
+        return {
+            "key": self.key,
+            "name": self.name,
+            "rel_path": self.rel_path,
+        }
 
 
 @dataclass(slots=True)

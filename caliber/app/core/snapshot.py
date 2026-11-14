@@ -12,12 +12,51 @@ from ..models import ComparisonResult, ImplEvaluation, MetricDefinition, utc_now
 from .evaluator import run_metric
 from .versioning import get_latest, list_metrics
 
-VERDICTS = ("consistent", "inconsistent", "partial")
+VERDICTS = ("consistent", "inconsistent", "partial", "unevaluable")
+DATASET_REF_FIELDS = ("key", "name", "rel_path")
+
+
+def normalize_dataset_refs(raw: Any) -> list[dict[str, str]]:
+    """Normalize the dataset list stored in a snapshot.
+
+    New snapshots persist reference objects (key/name/rel_path). Snapshots
+    written by older versions only stored bare file-name strings; those are
+    upgraded on read into reference objects with a readable note instead of
+    failing.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    refs: list[dict[str, str]] = []
+    legacy = False
+    for item in raw:
+        if isinstance(item, str):
+            legacy = True
+            refs.append({"key": item, "name": item, "rel_path": item + ".csv"})
+        elif isinstance(item, dict):
+            key = str(item.get("key", "")).strip()
+            if not key:
+                continue
+            refs.append(
+                {
+                    "key": key,
+                    "name": str(item.get("name") or key),
+                    "rel_path": str(item.get("rel_path") or key + ".csv"),
+                }
+            )
+    if legacy:
+        for ref in refs:
+            ref.setdefault(
+                "note",
+                "旧版快照仅记录了文件名，缺少子目录路径信息",
+            )
+    return refs
 
 
 def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
-    item["datasets"] = json.loads(item.pop("datasets_json"))
+    item["datasets"] = normalize_dataset_refs(json.loads(item.pop("datasets_json")))
     item["impl_ids"] = json.loads(item.pop("impl_ids_json"))
     item["summary"] = json.loads(item.pop("summary_json"))
     item["result"] = json.loads(item.pop("result_json"))
@@ -25,12 +64,15 @@ def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def create_run(conn: sqlite3.Connection, metrics: list[str], datasets_dir: str | Path,
-               tolerances: dict[str, float]) -> int:
+               tolerances: dict[str, float],
+               dataset_manifest: list[dict[str, Any]] | None = None) -> int:
     cursor = conn.execute(
-        "INSERT INTO runs(status, started_at, metrics_json, datasets_dir, tolerances_json) "
-        "VALUES ('running', ?, ?, ?, ?)",
+        "INSERT INTO runs(status, started_at, metrics_json, datasets_dir, "
+        "tolerances_json, datasets_manifest_json) "
+        "VALUES ('running', ?, ?, ?, ?, ?)",
         (utc_now(), json.dumps(metrics, ensure_ascii=False), str(datasets_dir),
-         json.dumps(tolerances, ensure_ascii=False)),
+         json.dumps(tolerances, ensure_ascii=False),
+         json.dumps(dataset_manifest or [], ensure_ascii=False)),
     )
     conn.commit()
     return int(cursor.lastrowid or 0)
@@ -47,11 +89,15 @@ def finish_run(conn: sqlite3.Connection, run_id: int, *, status: str,
 
 
 def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinition,
-                  comparison: ComparisonResult, evaluations: dict[str, ImplEvaluation]) -> int:
+                  comparison: ComparisonResult,
+                  evaluations: dict[str, ImplEvaluation],
+                  dataset_refs: list[dict[str, Any]],
+                  skipped: list[dict[str, str]] | None = None) -> int:
     result = comparison.to_dict()
     result["metric"] = metric.to_dict()
     result["implementations"] = [item.to_dict() for item in evaluations.values()]
-    datasets = sorted({item.source for item in evaluations.values()})
+    if skipped:
+        result["unevaluable_impls"] = list(skipped)
     cursor = conn.execute(
         """
         INSERT INTO snapshots(run_id, metric_key, metric_version, datasets_json,
@@ -60,7 +106,7 @@ def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinitio
         """,
         (
             run_id, metric.key, comparison.metric_version,
-            json.dumps(datasets, ensure_ascii=False),
+            json.dumps(dataset_refs, ensure_ascii=False),
             json.dumps(comparison.impl_ids, ensure_ascii=False),
             comparison.verdict,
             json.dumps(comparison.summary, ensure_ascii=False),
@@ -138,6 +184,10 @@ def _decode_run(row: sqlite3.Row) -> dict[str, Any]:
     item["metrics"] = json.loads(item.pop("metrics_json"))
     item["tolerances"] = json.loads(item.pop("tolerances_json"))
     item["summary"] = json.loads(item.pop("summary_json"))
+    raw_manifest = item.pop("datasets_manifest_json", None)
+    item["datasets_manifest"] = (
+        normalize_dataset_refs(json.loads(raw_manifest)) if raw_manifest else []
+    )
     return item
 
 
@@ -164,14 +214,17 @@ def perform_run(
     if not keys:
         raise RunError("没有可执行的指标，请先导入指标定义")
     tolerances = {"abs": float(abs_tolerance), "rel": float(rel_tolerance)}
-    run_id = create_run(conn, keys, datasets_dir, tolerances)
+    # Frozen at run time: every report/export of this run reads this exact
+    # dataset set and ordering, never a fresh directory scan.
+    manifest = catalog.manifest()
+    run_id = create_run(conn, keys, datasets_dir, tolerances, manifest)
     log_audit(conn, "run.started", f"run:{run_id}", "ok", {"metrics": keys})
     summary = {verdict: 0 for verdict in VERDICTS}
     try:
         for key in keys:
             latest = get_latest(conn, key)
             metric = MetricDefinition.from_dict(latest["definition"])
-            comparison, evaluations = run_metric(
+            comparison, evaluations, skipped = run_metric(
                 metric,
                 int(latest["version"]),
                 catalog,
@@ -181,7 +234,12 @@ def perform_run(
                 abs_tolerance=abs_tolerance,
                 rel_tolerance=rel_tolerance,
             )
-            save_snapshot(conn, run_id, metric, comparison, evaluations)
+            refs = catalog.references_for(
+                [item.source for item in metric.impls]
+            )
+            save_snapshot(
+                conn, run_id, metric, comparison, evaluations, refs, skipped
+            )
             summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id

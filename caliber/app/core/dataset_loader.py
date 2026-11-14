@@ -96,6 +96,40 @@ def _read_csv(path: Path) -> tuple[str, list[str], list[list[str]]]:
     return encoding, header, data_rows
 
 
+def _build_keys(directory: Path, paths: list[Path]) -> dict[Path, str]:
+    """Assign each CSV a stable key.
+
+    Top-level files keep their bare stem key (backwards compatible); files in
+    subdirectories get a path-derived, deterministic key so that same-named
+    CSVs in different subdirectories never overwrite each other.
+    """
+    base_keys: dict[Path, str] = {}
+    for path in paths:
+        stem_key = normalize_header(path.stem, 0)
+        if path.parent == directory:
+            base_keys[path] = stem_key
+            continue
+        rel = path.relative_to(directory).with_suffix("")
+        parts = [normalize_header(part, 0) for part in rel.parts]
+        base_keys[path] = "__".join(parts)
+    used: set[str] = set()
+    result: dict[Path, str] = {}
+    for path in paths:
+        key = base_keys[path]
+        if key not in used:
+            used.add(key)
+            result[path] = key
+            continue
+        # Deterministic disambiguation for any residual collision.
+        suffix = 2
+        while f"{key}_{suffix}" in used:
+            suffix += 1
+        unique_key = f"{key}_{suffix}"
+        used.add(unique_key)
+        result[path] = unique_key
+    return result
+
+
 class DatasetCatalog:
     """Owns writable loading connections and one query-only connection."""
 
@@ -105,26 +139,34 @@ class DatasetCatalog:
         self._conn.row_factory = sqlite3.Row
         self._readonly: sqlite3.Connection | None = None
         self.datasets: dict[str, DatasetMeta] = {}
+        self._by_name: dict[str, list[DatasetMeta]] = {}
         try:
             self._load_directory()
         except Exception:
             self._conn.close()
             raise
 
+    def _discover_csv_files(self) -> list[Path]:
+        return sorted(
+            (path for path in self.directory.rglob("*.csv") if path.is_file()),
+            key=lambda item: item.relative_to(self.directory).as_posix(),
+        )
+
     def _load_directory(self) -> None:
         if not self.directory.is_dir():
             raise DatasetError(f"数据集目录不存在: {self.directory}")
-        files = sorted(self.directory.glob("*.csv"))
+        files = self._discover_csv_files()
         if not files:
             raise DatasetError(f"数据集目录中没有 CSV 文件: {self.directory}")
+        keys = _build_keys(self.directory, files)
         for path in files:
-            self._load_file(path)
+            self._load_file(path, keys[path])
         self._conn.commit()
 
-    def _load_file(self, path: Path) -> None:
-        key = normalize_header(path.stem, 0)
+    def _load_file(self, path: Path, key: str) -> None:
         if key in self.datasets:
             raise DatasetError(f"数据集 key 重复: {key}")
+        rel_path = path.relative_to(self.directory).as_posix()
         encoding, header, rows = _read_csv(path)
         columns_raw = list(zip(*rows))
         types = [infer_type(column) for column in columns_raw]
@@ -141,22 +183,62 @@ class DatasetCatalog:
             for row in rows
         ]
         self._conn.executemany(sql, converted)
-        self.datasets[key] = DatasetMeta(
+        meta = DatasetMeta(
             key=key,
             path=str(path),
             encoding=encoding,
             row_count=len(rows),
             column_count=len(header),
             columns=columns,
+            name=path.stem,
+            rel_path=rel_path,
         )
+        self.datasets[key] = meta
+        self._by_name.setdefault(meta.name, []).append(meta)
 
     def list_metadata(self) -> list[DatasetMeta]:
-        return [self.datasets[key] for key in sorted(self.datasets)]
+        """Metadata in deterministic load order (relative path order)."""
+        return sorted(self.datasets.values(), key=lambda item: (item.rel_path, item.key))
+
+    def manifest(self) -> list[dict[str, Any]]:
+        """Ordered dataset references representing this run's actual files."""
+        return [item.reference() for item in self.list_metadata()]
 
     def require(self, key: str) -> DatasetMeta:
         if key not in self.datasets:
             raise NotFoundError(f"数据集不存在: {key}")
         return self.datasets[key]
+
+    def resolve(self, source: str) -> DatasetMeta | None:
+        """Resolve a metric's ``source`` reference without raising.
+
+        Exact keys (including path-derived keys) win; a bare file stem is
+        accepted only when it uniquely identifies one dataset.
+        """
+        if source in self.datasets:
+            return self.datasets[source]
+        candidates = self._by_name.get(source, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    def ambiguity(self, source: str) -> list[DatasetMeta]:
+        """Datasets sharing a bare-stem name when ``source`` is ambiguous."""
+        if source in self.datasets:
+            return []
+        return list(self._by_name.get(source, []))
+
+    def references_for(self, sources: Iterable[str]) -> list[dict[str, Any]]:
+        """Stable references for the sources actually used by a metric."""
+        metas: list[DatasetMeta] = []
+        seen: set[str] = set()
+        for source in sources:
+            meta = self.resolve(source)
+            if meta is not None and meta.key not in seen:
+                seen.add(meta.key)
+                metas.append(meta)
+        metas.sort(key=lambda item: (item.rel_path, item.key))
+        return [item.reference() for item in metas]
 
     def readonly_connection(self) -> sqlite3.Connection:
         if self._readonly is None:
