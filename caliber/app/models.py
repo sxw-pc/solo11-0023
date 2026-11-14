@@ -73,7 +73,7 @@ class ImportResult:
 @dataclass(slots=True)
 class ImportSummary:
     imported: list[ImportResult] = field(default_factory=list)
-    errors: list[dict[str, str]] = field(default_factory=list)
+    errors: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:

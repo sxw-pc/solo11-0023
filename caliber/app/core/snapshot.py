@@ -10,7 +10,7 @@ from ..audit import log_audit, record_error
 from ..errors import CaliberError, NotFoundError, RunError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition, utc_now
 from .evaluator import run_metric
-from .versioning import get_latest, list_metrics
+from .versioning import get_latest, impls_for_version, list_metrics
 
 VERDICTS = ("consistent", "inconsistent", "partial")
 
@@ -171,6 +171,12 @@ def perform_run(
         for key in keys:
             latest = get_latest(conn, key)
             metric = MetricDefinition.from_dict(latest["definition"])
+            # Execution only sees the implementations declared by the version
+            # being run.  The per-version list is authoritative, so a retired
+            # impl from an older version can never leak into this run.
+            declared = impls_for_version(conn, key, int(latest["version"]))
+            if declared:
+                metric.impls = declared
             comparison, evaluations = run_metric(
                 metric,
                 int(latest["version"]),

@@ -29,6 +29,20 @@ CREATE TABLE IF NOT EXISTS metric_versions (
     UNIQUE(metric_key, version)
 );
 
+-- 每个指标的每个历史版本各自保留一份实现清单。执行侧只读取当前版本的
+-- 清单；历史行不随版本切换删除，用于追溯。老仓库无需清空重导：读取时
+-- 回退到该版本自己的 definition_json，下次导入时按版本补齐本表。
+CREATE TABLE IF NOT EXISTS metric_impls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    impl_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    sql_file TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    UNIQUE(metric_key, version, impl_id)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     status TEXT NOT NULL,
@@ -64,6 +78,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_versions_key ON metric_versions(metric_key, version DESC);
+CREATE INDEX IF NOT EXISTS idx_metric_impls_version
+    ON metric_impls(metric_key, version, position);
 CREATE INDEX IF NOT EXISTS idx_snapshots_key ON snapshots(metric_key, id DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_run ON snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);

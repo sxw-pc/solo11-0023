@@ -84,6 +84,22 @@ def _import_metrics(args: argparse.Namespace, config: Config, conn: sqlite3.Conn
         print(f"导入 {item.key} v{item.version}（{item.name}）")
     for error in summary.errors:
         print(f"失败 {error['file']}: [{error['error']}] {error['message']}", file=sys.stderr)
+        key = error.get("metric_key") or "<未知 key>"
+        version = error.get("version")
+        current = error.get("current_version")
+        if version is None:
+            version_note = "版本未生成"
+        elif current is None:
+            version_note = f"候选 v{version}（未落盘）"
+        else:
+            version_note = f"候选 v{version}（未落盘，current_version 保持 v{current}）"
+        print(f"  定位: key={key} {version_note}", file=sys.stderr)
+        impl_ids = error.get("impl_ids") or []
+        if impl_ids:
+            print(f"  实现: {', '.join(impl_ids)}", file=sys.stderr)
+        fields = error.get("fields") or []
+        for field in fields:
+            print(f"  字段: {field}", file=sys.stderr)
     print(f"完成：成功 {len(summary.imported)}，失败 {len(summary.errors)}")
     return 0 if summary.ok else 1
 
