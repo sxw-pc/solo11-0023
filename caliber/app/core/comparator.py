@@ -14,10 +14,18 @@ def values_match(
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
 ) -> bool:
-    """Absolute + relative tolerance; equality at the boundary is a match."""
+    """独立的绝对/相对容差判定：任一满足即视为落在容差内，边界相等算通过。
+
+    两个容差彼此独立，不做加和：
+    ``|left-right| <= abs_tolerance`` 或
+    ``|left-right| <= rel_tolerance * max(|left|, |right|)``。
+    相对容差以两个数值中绝对值较大者为基数。
+    """
     difference = abs(left - right)
+    if difference <= abs_tolerance:
+        return True
     scale = max(abs(left), abs(right))
-    return difference <= abs_tolerance + rel_tolerance * scale
+    return scale > 0 and difference <= rel_tolerance * scale
 
 
 def compare_impl_results(

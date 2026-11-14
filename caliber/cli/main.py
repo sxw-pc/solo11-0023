@@ -93,6 +93,12 @@ def _run(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> 
     keys = [item.strip() for item in args.metrics.split(",") if item.strip()] if args.metrics else None
     catalog = load_catalog(datasets_dir)
     try:
+        for item in catalog.load_errors:
+            print(
+                f"警告: 数据集 {item['dataset']}（{item['file']}）加载失败已跳过: "
+                f"{item['message']}",
+                file=sys.stderr,
+            )
         run_id = perform_run(
             conn,
             keys,

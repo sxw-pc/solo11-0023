@@ -114,6 +114,68 @@ def test_run_with_tolerance_fields(imported_client, app_config):
     assert response.status_code == 400
 
 
+def test_run_with_broken_dataset_returns_warnings_and_keeps_going(
+    imported_client, app_config
+):
+    from app.core.dataset_loader import DatasetCatalog
+
+    broken = app_config.datasets_dir / "broken_batch.csv"
+    broken.write_text("a,b,c\n1,2\n", encoding="utf-8")
+    try:
+        catalog = DatasetCatalog(app_config.datasets_dir)
+        assert any(item["dataset"] == "broken_batch" for item in catalog.load_errors)
+        catalog.close()
+        response = imported_client.post(
+            "/api/runs",
+            json={"metrics": ["active_users"], "datasets_dir": str(app_config.datasets_dir)},
+        )
+        assert response.status_code == 201
+        warnings = response.get_json()["dataset_warnings"]
+        assert any(item["dataset"] == "broken_batch" for item in warnings)
+    finally:
+        broken.unlink(missing_ok=True)
+
+
+def test_report_api_emits_strict_json_with_non_finite_values(tmp_path: Path):
+    import math
+
+    from app import create_app
+    from app.config import Config
+    from app.core.snapshot import create_run, save_snapshot
+    from app.db import init_db
+    from app.models import ComparisonResult, DimensionDiff, ImplEvaluation, MetricDefinition
+
+    db_path = tmp_path / "api-safe" / "caliber.sqlite3"
+    conn = init_db(db_path)
+    run_id = create_run(conn, ["edge"], str(tmp_path), {"abs": 0.0, "rel": 0.0})
+    metric = MetricDefinition("edge", "极值", "qa", "d", "x", "day", [])
+    diff = DimensionDiff(
+        "d1", "value_mismatch",
+        {"impl_a": math.inf, "impl_b": math.nan}, math.inf, "数值超出容差",
+    )
+    comparison = ComparisonResult(
+        "edge", 1, ["impl_a", "impl_b"], "inconsistent", ["d1"], [diff],
+        {"impl_count": 2, "dimension_count": 1, "consistent_dimensions": 0,
+         "value_mismatches": 1, "missing_dimensions": 0, "diff_count": 1},
+        0.0, 0.0,
+    )
+    evaluations = {
+        "impl_a": ImplEvaluation("impl_a", "ds", "a.sql", {"d1": math.inf}, 1, 1.0),
+        "impl_b": ImplEvaluation("impl_b", "ds", "b.sql", {"d1": math.nan}, 1, 1.0),
+    }
+    save_snapshot(conn, run_id, metric, comparison, evaluations)
+    conn.close()
+
+    app = create_app(Config(data_dir=tmp_path, db_path=db_path, testing=True))
+    client = app.test_client()
+    response = client.get(f"/api/reports/{run_id}?format=json")
+    assert response.status_code == 200
+    raw = response.get_data(as_text=True)
+    # HTTP 出口必须是严格 JSON，不含裸 NaN/Infinity
+    json.loads(raw, parse_constant=lambda c: (_ for _ in ()).throw(AssertionError(c)))
+    assert '"Infinity"' in raw and '"NaN"' in raw
+
+
 def test_web_pages_are_local_and_render(imported_client, app_config):
     home = imported_client.get("/")
     assert home.status_code == 200
@@ -144,3 +206,44 @@ def test_web_pages_are_local_and_render(imported_client, app_config):
 
     assert imported_client.get("/metrics/missing").status_code == 404
     assert imported_client.get("/reports/999").status_code == 404
+
+
+def test_web_report_page_renders_non_finite_values(tmp_path: Path):
+    import math
+
+    from app import create_app
+    from app.config import Config
+    from app.core.snapshot import create_run, finish_run, save_snapshot
+    from app.db import init_db
+    from app.models import ComparisonResult, DimensionDiff, ImplEvaluation, MetricDefinition
+
+    db_path = tmp_path / "web-safe" / "caliber.sqlite3"
+    conn = init_db(db_path)
+    run_id = create_run(conn, ["edge"], str(tmp_path), {"abs": 0.0, "rel": 0.0})
+    metric = MetricDefinition("edge", "极值", "qa", "d", "x", "day", [])
+    diff = DimensionDiff(
+        "d1", "value_mismatch",
+        {"impl_a": math.inf, "impl_b": -math.inf}, math.inf, "数值超出容差",
+    )
+    comparison = ComparisonResult(
+        "edge", 1, ["impl_a", "impl_b"], "inconsistent", ["d1"], [diff],
+        {"impl_count": 2, "dimension_count": 1, "consistent_dimensions": 0,
+         "value_mismatches": 1, "missing_dimensions": 0, "diff_count": 1},
+        0.0, 0.0,
+    )
+    evaluations = {
+        "impl_a": ImplEvaluation("impl_a", "ds", "a.sql", {"d1": math.inf}, 1, 1.0),
+        "impl_b": ImplEvaluation("impl_b", "ds", "b.sql", {"d1": -math.inf}, 1, 1.0),
+    }
+    save_snapshot(conn, run_id, metric, comparison, evaluations)
+    finish_run(conn, run_id, status="completed",
+               summary={"consistent": 0, "inconsistent": 1, "partial": 0,
+                        "metrics": 1, "run_id": run_id})
+    conn.close()
+
+    app = create_app(Config(data_dir=tmp_path, db_path=db_path, testing=True))
+    page = app.test_client().get(f"/reports/{run_id}")
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    assert "Infinity" in body and "-Infinity" in body
+    assert "inf</td>" not in body and "<td>inf" not in body

@@ -5,6 +5,7 @@ import html
 import sqlite3
 
 from flask import Flask, g, jsonify, render_template, request
+from flask.json.provider import DefaultJSONProvider
 
 from .api.routes_datasets import bp as datasets_bp
 from .api.routes_metrics import bp as metrics_bp
@@ -14,11 +15,27 @@ from .audit import record_error
 from .config import Config
 from .core import versioning
 from .core.dataset_loader import load_catalog
-from .core.reporter import build_report
+from .core.reporter import _non_finite_token, build_report, json_safe
 from .core.snapshot import list_runs, list_snapshots, snapshots_for_run
 from .db import connect, init_db, table_counts
 from .errors import CaliberError
 from .models import utc_now
+
+
+class SafeJSONProvider(DefaultJSONProvider):
+    """严格 JSON：非有限浮点数序列化为字符串标记，不输出 NaN/Infinity token。"""
+
+    ensure_ascii = False
+
+    def dumps(self, obj, **kwargs):
+        kwargs.setdefault("allow_nan", False)
+        return super().dumps(json_safe(obj), **kwargs)
+
+
+def _format_number(value):
+    """与报告导出保持一致的数值渲染，非有限值输出 Infinity/-Infinity/NaN。"""
+    token = _non_finite_token(float(value))
+    return token if token is not None else f"{float(value):.6g}"
 
 
 def create_app(config: Config | None = None) -> Flask:
@@ -27,8 +44,9 @@ def create_app(config: Config | None = None) -> Flask:
     init_db(cfg.db_path).close()
 
     app = Flask(__name__)
+    app.json = SafeJSONProvider(app)
+    app.jinja_env.filters["caliber_number"] = _format_number
     app.config["CALIBER"] = cfg
-    app.json.ensure_ascii = False
     for blueprint in (metrics_bp, runs_bp, datasets_bp, reports_bp):
         app.register_blueprint(blueprint)
 

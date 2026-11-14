@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import sqlite3
 from typing import Any
 
@@ -12,6 +13,28 @@ from ..models import utc_now
 from .snapshot import detect_drift, get_run, snapshots_for_run
 
 FORMATS = ("json", "md", "html")
+# 导出动作本身不进入报告内嵌的审计列表，否则同一 run 每导出一次内容就变化
+_EXCLUDED_AUDIT_ACTIONS = ("report.export",)
+
+
+def _non_finite_token(value: float) -> str | None:
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    return None
+
+
+def json_safe(value: Any) -> Any:
+    """递归把非有限浮点数替换成合法 JSON 字符串标记，保证严格解析器可消费。"""
+    if isinstance(value, float):
+        token = _non_finite_token(value)
+        return token if token is not None else value
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    return value
 
 
 def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
@@ -52,9 +75,16 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     drift_events: list[dict[str, Any]] = []
     for key in sorted(keys):
         drift_events.extend(detect_drift(conn, key))
+    # 报告内容对同一 run 必须可复现：时间戳锚定 run 本身，且排除导出动作产生的审计
+    generated_at = run.get("finished_at") or run.get("started_at") or utc_now()
+    audit = [
+        item
+        for item in list_audit(conn, 50)
+        if item.get("action") not in _EXCLUDED_AUDIT_ACTIONS
+    ]
     return {
         "report_version": "1.0",
-        "generated_at": utc_now(),
+        "generated_at": generated_at,
         "run": run,
         "summary": {
             "metric_count": len(metrics),
@@ -63,18 +93,24 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         },
         "metrics": metrics,
         "drift_events": drift_events,
-        "audit": list_audit(conn, 50),
+        "audit": audit,
     }
 
 
 def render_json(report: dict[str, Any]) -> str:
-    return json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
+    # allow_nan=False 只是兜底：非有限值已由 json_safe 转成字符串标记
+    return json.dumps(
+        json_safe(report), ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False
+    )
 
 
 def _cell(value: Any) -> str:
     if value is None:
         return "缺失"
     if isinstance(value, float):
+        token = _non_finite_token(value)
+        if token is not None:
+            return token
         return f"{value:.6g}"
     return str(value).replace("|", "\\|").replace("\n", " ")
 

@@ -57,10 +57,17 @@ def create_run():
             abs_tolerance=_tolerance(payload, "abs", config.abs_tolerance),
             rel_tolerance=_tolerance(payload, "rel", config.rel_tolerance),
         )
+        load_errors = list(catalog.load_errors)
     finally:
         catalog.close()
     run = get_run(g.db, run_id)
-    return jsonify({"run": run, "snapshots": snapshots_for_run(g.db, run_id)}), 201
+    return jsonify(
+        {
+            "run": run,
+            "snapshots": snapshots_for_run(g.db, run_id),
+            "dataset_warnings": load_errors,
+        }
+    ), 201
 
 
 @bp.get("")

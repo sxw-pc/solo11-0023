@@ -18,9 +18,12 @@ def list_datasets():
     catalog = _catalog()
     try:
         items = [item.to_dict() for item in catalog.list_metadata()]
+        load_errors = list(catalog.load_errors)
     finally:
         catalog.close()
-    return jsonify({"datasets": items, "count": len(items)})
+    return jsonify(
+        {"datasets": items, "count": len(items), "load_errors": load_errors}
+    )
 
 
 @bp.get("/<key>")

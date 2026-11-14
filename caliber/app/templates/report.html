@@ -69,9 +69,9 @@
           <td><code>{{ diff.dimension }}</code></td>
           <td><span class="pill {{ 'inconsistent' if diff.kind == 'value_mismatch' else 'partial' }}">{{ diff.kind }}</span></td>
           {% for impl_id in item.impl_ids %}
-            <td>{% set value = diff.values.get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
+            <td>{% set value = diff["values"].get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ value | caliber_number }}{% endif %}</td>
           {% endfor %}
-          <td>{% if diff.max_delta is none %}-{% else %}{{ "%.6g" | format(diff.max_delta) }}{% endif %}</td>
+          <td>{% if diff.max_delta is none %}-{% else %}{{ diff.max_delta | caliber_number }}{% endif %}</td>
         </tr>
       {% endfor %}
       </tbody>

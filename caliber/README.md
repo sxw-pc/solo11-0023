@@ -10,7 +10,7 @@
 
 - 指标定义 DSL（YAML）与结构化校验。
 - 指标仓库：SQLite 存储、自增版本、历史读取、字段级版本差异。
-- 离线数据源：目录内 CSV 加载到内存 SQLite，支持编码、表头规范化与类型推断。
+- 离线数据源：目录内 CSV 加载到内存 SQLite，支持 UTF-8/UTF-8 BOM 编码、表头规范化与类型推断；单个数据集读取失败只跳过该文件并给出数据集/列级定位，不中断同批其他数据集。
 - 多实现比对：维度对齐、缺失维度识别、绝对/相对容差判定。
 - 口径快照、`consistent → inconsistent` 漂移检测、审计日志。
 - 本地 Flask 页面、HTTP API、命令行入口与三种报告格式。
@@ -56,7 +56,7 @@ python -m app serve
 pytest
 pytest --cov=app/core --cov-report=term-missing
 ```
-导出的 JSON 报告是机器可读结果；`report --format json --output report.json` 可写入文件。HTML 报告是单文件、内联样式的独立页面。
+导出的 JSON 报告是严格合法的机器可读结果（非有限值 `Infinity` / `-Infinity` / `NaN` 序列化为字符串标记，不输出裸 JSON 常量）；`report --format json --output report.json` 可写入文件。HTML 报告是单文件、内联样式的独立页面。同一 run 无论用 `--last` 还是 `--run-id`、无论哪种格式，差异维度与汇总数字完全一致；报告时间戳锚定 run 本身，导出动作不进入报告内嵌审计，因此可重复导出且内容稳定。
 
 ## 3. 指标 DSL
 
@@ -111,13 +111,15 @@ SQL 约定：
 
 ## 4. 一致性判定规则
 
-对同一指标的每个实现，分别得到 `维度 -> 数值` 的字典，然后对所有实现的结果取维度并集逐项比较。数值相等判定为：
+对同一指标的每个实现，分别得到 `维度 -> 数值` 的字典，然后对所有实现的结果取维度并集逐项比较。绝对容差与相对容差彼此独立，满足任一即视为落在容差内：
 
 ```text
-|a - b| <= abs_tolerance + rel_tolerance * max(|a|, |b|)
+|a - b| <= abs_tolerance
+  或
+|a - b| <= rel_tolerance * max(|a|, |b|)
 ```
 
-边界值按「不超过」视为一致。默认绝对容差为 `1e-6`，相对容差为 `0.0`；可在 CLI 使用 `--abs-tol` / `--rel-tol`，或在 API 请求体传入 `tolerances: {abs, rel}`。
+两个容差不做加和：必须分别独立判断，不会因为两者之和覆盖差异就放行。基数为 0 时相对容差不参与判定，仅绝对容差生效。边界值按「不超过」视为一致。默认绝对容差为 `1e-6`，相对容差为 `0.0`；可在 CLI 使用 `--abs-tol` / `--rel-tol`，或在 API 请求体传入 `tolerances: {abs, rel}`。每次运行实际生效的容差会同时记录在 run 与各指标快照中。
 
 判定为三态：
 
