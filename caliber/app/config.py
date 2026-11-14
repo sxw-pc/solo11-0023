@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .engine import DEFAULT_MIN_SQLITE_VERSION, parse_version
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -27,6 +29,7 @@ class Config:
     max_result_rows: int = 10_000
     abs_tolerance: float = 1e-6
     rel_tolerance: float = 0.0
+    min_sqlite_version: str = DEFAULT_MIN_SQLITE_VERSION
     testing: bool = False
 
     @classmethod
@@ -37,6 +40,13 @@ class Config:
         host = os.environ.get("CALIBER_HOST", "127.0.0.1")
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("CALIBER_HOST 只允许回环地址")
+        min_sqlite_version = os.environ.get(
+            "CALIBER_MIN_SQLITE_VERSION", DEFAULT_MIN_SQLITE_VERSION
+        )
+        try:
+            parse_version(min_sqlite_version)
+        except ValueError as exc:
+            raise ValueError(f"CALIBER_MIN_SQLITE_VERSION 非法: {exc}") from exc
         return cls(
             data_dir=data_dir,
             db_path=Path(os.environ.get("CALIBER_DB", data_dir / "caliber.sqlite3")),
@@ -46,6 +56,7 @@ class Config:
             sql_roots=(fixtures / "impls",),
             host=host,
             port=int(os.environ.get("CALIBER_PORT", "5057")),
+            min_sqlite_version=min_sqlite_version,
         )
 
     def ensure_dirs(self) -> None:

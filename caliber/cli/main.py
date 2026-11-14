@@ -8,14 +8,15 @@ import sqlite3
 from pathlib import Path
 
 from app import run_local
-from app.audit import log_audit, record_error
+from app.audit import list_audit, log_audit, record_error
 from app.config import Config
 from app.core.dataset_loader import load_catalog
 from app.core.registry import MetricRegistry
 from app.core.reporter import build_report, export_report
 from app.core.snapshot import get_run, list_runs, perform_run, snapshots_for_run
-from app.db import init_db
+from app.db import connect
 from app.errors import CaliberError
+from app.migrations import current_schema_version, migrate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--format", choices=("json", "md", "html"), default="md")
     report.add_argument("--output", type=Path, help="输出文件；省略则打印到标准输出")
     report.set_defaults(handler=_report)
+
+    mig = sub.add_parser("migrate", help="检查并应用数据库 schema 迁移（幂等，可重复执行）")
+    mig.set_defaults(handler=_migrate)
     return parser
 
 
@@ -145,13 +149,39 @@ def _audit_failure(conn: sqlite3.Connection | None, command: str, exc: Exception
         pass
 
 
+def _migrate(args: argparse.Namespace, config: Config, conn: sqlite3.Connection) -> int:
+    applied = migrate(conn)
+    version = current_schema_version(conn)
+    for step in applied:
+        print(f"应用迁移：schema v{step['from_version']} → v{step['version']}（{step['name']}）")
+    if not applied:
+        print(f"数据库 schema 已是最新（v{version}），无需迁移")
+    records = [item for item in list_audit(conn, 200) if item["action"] == "db.migrated"]
+    if records:
+        print("迁移审计记录：")
+        for record in records:
+            detail = record.get("detail") or {}
+            print(
+                f"- {record['created_at']} {record['entity']} "
+                f"v{detail.get('from_version')} → v{detail.get('to_version')} "
+                f"（{detail.get('migration', '-')}）"
+            )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     conn: sqlite3.Connection | None = None
     try:
         config = _config(args)
-        conn = init_db(config.db_path)
+        conn = connect(config.db_path, min_sqlite_version=config.min_sqlite_version)
+        for step in migrate(conn):
+            print(
+                f"数据库 schema 已自动迁移：v{step['from_version']} → "
+                f"v{step['version']}（{step['name']}）",
+                file=sys.stderr,
+            )
         return int(args.handler(args, config, conn))
     except CaliberError as exc:
         print(f"错误 [{exc.code}]: {exc.message}", file=sys.stderr)

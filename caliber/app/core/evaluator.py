@@ -8,6 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from ..engine import FEATURE_INFO, Capabilities, ExecutionProfile, probe_capabilities
 from ..errors import EvaluationError, EvaluationTimeout, UnsafeSQLError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition
 from .comparator import compare_impl_results
@@ -20,6 +21,35 @@ FORBIDDEN = re.compile(
     re.IGNORECASE,
 )
 START = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
+
+#: Newer SQL syntax that implementation queries may rely on.  Checked against
+#: the probed engine capabilities before execution, so an old engine fails
+#: with a readable feature/version error instead of a raw syntax error.
+WINDOW_RE = re.compile(
+    r"\bOVER\s*\(|\b(?:ROW_NUMBER|RANK|DENSE_RANK|NTILE|CUME_DIST|PERCENT_RANK|"
+    r"LAG|LEAD|FIRST_VALUE|LAST_VALUE|NTH_VALUE)\s*\(",
+    re.IGNORECASE,
+)
+JSON1_RE = re.compile(
+    r"\bJSON_(?:EACH|TREE|EXTRACT|INSERT|REPLACE|SET|REMOVE|OBJECT|ARRAY|"
+    r"ARRAY_LENGTH|TYPE|VALID|QUOTE|PATCH|GROUP_ARRAY|GROUP_OBJECT)\s*\(",
+    re.IGNORECASE,
+)
+
+
+def required_features(sql: str) -> list[str]:
+    """Best-effort detection of capability-gated syntax in a query.
+
+    Runs on the sanitized SQL (comments and string literals stripped), so
+    keywords inside literals never trigger a false positive.
+    """
+    code = _sanitized(sql)
+    features: list[str] = []
+    if WINDOW_RE.search(code):
+        features.append("window_functions")
+    if JSON1_RE.search(code):
+        features.append("json1")
+    return features
 
 
 def _sanitized(sql: str) -> str:
@@ -123,9 +153,26 @@ def evaluate_sql(
     max_rows: int = 10_000,
     grain: str = "day",
     impl_id: str = "impl",
+    capabilities: Capabilities | None = None,
 ) -> tuple[dict[str, float], int, float]:
     """Execute one query on a query-only connection with timeout and row cap."""
     validated = validate_readonly_sql(sql)
+    caps = capabilities or probe_capabilities(conn)
+    missing = [name for name in required_features(validated) if not caps.supports(name)]
+    if missing:
+        feature = missing[0]
+        info = FEATURE_INFO[feature]
+        raise EvaluationError(
+            f"实现 {impl_id} 的 SQL 需要{info['label']}（SQLite ≥ "
+            f"{info['min_version']}），当前引擎 {caps.sqlite_version} 不支持",
+            code="unsupported_sql_feature",
+            details={
+                "impl_id": impl_id,
+                "feature": feature,
+                "sqlite_version": caps.sqlite_version,
+                "required_sqlite_version": info["min_version"],
+            },
+        )
     started = time.monotonic()
     deadline = started + max(0.001, float(timeout_seconds))
     conn.set_progress_handler(
@@ -191,9 +238,11 @@ def evaluate_metric_impls(
     *,
     timeout_seconds: float = 5.0,
     max_rows: int = 10_000,
+    profile: ExecutionProfile | None = None,
 ) -> dict[str, ImplEvaluation]:
     results: dict[str, ImplEvaluation] = {}
     conn = catalog.readonly_connection()
+    caps = profile.capabilities if profile is not None else probe_capabilities(conn)
     for impl in metric.impls:
         catalog.require(impl.source)
         sql_path = resolve_sql_path(impl.sql_file, sql_roots)
@@ -201,14 +250,23 @@ def evaluate_metric_impls(
             sql = sql_path.read_text(encoding="utf-8-sig")
         except OSError as exc:
             raise EvaluationError(f"无法读取 SQL 文件: {sql_path}: {exc}") from exc
-        values, row_count, duration = evaluate_sql(
-            conn,
-            sql,
-            timeout_seconds=timeout_seconds,
-            max_rows=max_rows,
-            grain=metric.grain,
-            impl_id=impl.id,
-        )
+        try:
+            values, row_count, duration = evaluate_sql(
+                conn,
+                sql,
+                timeout_seconds=timeout_seconds,
+                max_rows=max_rows,
+                grain=metric.grain,
+                impl_id=impl.id,
+                capabilities=caps,
+            )
+        except EvaluationError as exc:
+            if profile is not None and exc.code == "unsupported_sql_feature":
+                feature = ""
+                if isinstance(exc.details, dict):
+                    feature = str(exc.details.get("feature", ""))
+                profile.record_blocked(feature, exc.message)
+            raise
         results[impl.id] = ImplEvaluation(
             impl_id=impl.id,
             source=impl.source,
@@ -230,6 +288,7 @@ def run_metric(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    profile: ExecutionProfile | None = None,
 ) -> tuple[ComparisonResult, dict[str, ImplEvaluation]]:
     evaluations = evaluate_metric_impls(
         metric,
@@ -238,6 +297,7 @@ def run_metric(
         sql_roots,
         timeout_seconds=timeout_seconds,
         max_rows=max_rows,
+        profile=profile,
     )
     comparison = compare_impl_results(
         {impl_id: item.values for impl_id, item in evaluations.items()},

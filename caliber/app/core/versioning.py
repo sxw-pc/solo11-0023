@@ -5,6 +5,7 @@ import json
 import sqlite3
 from typing import Any
 
+from ..engine import Capabilities, probe_capabilities
 from ..errors import NotFoundError
 from ..models import MetricDefinition, utc_now
 
@@ -21,8 +22,16 @@ def append_version(
     conn: sqlite3.Connection,
     metric: MetricDefinition,
     source_file: str = "<inline>",
+    *,
+    capabilities: Capabilities | None = None,
 ) -> int:
-    """Insert an immutable version and update the latest pointer atomically."""
+    """Insert an immutable version and update the latest pointer atomically.
+
+    Uses the UPSERT dialect when the engine supports it (SQLite ≥ 3.24);
+    older engines fall back to an equivalent UPDATE-then-INSERT pair inside
+    the same IMMEDIATE transaction, so the outcome is identical.
+    """
+    caps = capabilities or probe_capabilities(conn)
     now = utc_now()
     definition_json = json.dumps(metric.to_dict(), ensure_ascii=False, sort_keys=True)
     try:
@@ -31,19 +40,40 @@ def append_version(
             "SELECT current_version FROM metrics WHERE key = ?", (metric.key,)
         ).fetchone()
         version = int(row["current_version"]) + 1 if row else 1
-        conn.execute(
-            """
-            INSERT INTO metrics(key, name, owner, unit, grain, current_version,
-                                definition_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                name=excluded.name, owner=excluded.owner, unit=excluded.unit,
-                grain=excluded.grain, current_version=excluded.current_version,
-                definition_json=excluded.definition_json, updated_at=excluded.updated_at
-            """,
-            (metric.key, metric.name, metric.owner, metric.unit, metric.grain,
-             version, definition_json, now, now),
-        )
+        if caps.upsert:
+            conn.execute(
+                """
+                INSERT INTO metrics(key, name, owner, unit, grain, current_version,
+                                    definition_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    name=excluded.name, owner=excluded.owner, unit=excluded.unit,
+                    grain=excluded.grain, current_version=excluded.current_version,
+                    definition_json=excluded.definition_json, updated_at=excluded.updated_at
+                """,
+                (metric.key, metric.name, metric.owner, metric.unit, metric.grain,
+                 version, definition_json, now, now),
+            )
+        else:
+            updated = conn.execute(
+                """
+                UPDATE metrics SET name = ?, owner = ?, unit = ?, grain = ?,
+                                   current_version = ?, definition_json = ?, updated_at = ?
+                WHERE key = ?
+                """,
+                (metric.name, metric.owner, metric.unit, metric.grain,
+                 version, definition_json, now, metric.key),
+            )
+            if int(updated.rowcount or 0) == 0:
+                conn.execute(
+                    """
+                    INSERT INTO metrics(key, name, owner, unit, grain, current_version,
+                                        definition_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (metric.key, metric.name, metric.owner, metric.unit, metric.grain,
+                     version, definition_json, now, now),
+                )
         conn.execute(
             "INSERT INTO metric_versions(metric_key, version, definition_json, "
             "source_file, created_at) VALUES (?, ?, ?, ?, ?)",

@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from ..audit import list_audit
+from ..engine import ExecutionProfile, probe_capabilities
 from ..errors import ReportError
 from ..models import utc_now
 from .snapshot import detect_drift, get_run, snapshots_for_run
@@ -17,6 +18,7 @@ FORMATS = ("json", "md", "html")
 def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     run = get_run(conn, run_id)
     snapshots = snapshots_for_run(conn, run_id)
+    profile = ExecutionProfile(probe_capabilities(conn))
     metrics: list[dict[str, Any]] = []
     counts = {"consistent": 0, "inconsistent": 0, "partial": 0}
     keys: set[str] = set()
@@ -51,7 +53,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         )
     drift_events: list[dict[str, Any]] = []
     for key in sorted(keys):
-        drift_events.extend(detect_drift(conn, key))
+        drift_events.extend(detect_drift(conn, key, profile=profile))
     return {
         "report_version": "1.0",
         "generated_at": utc_now(),
@@ -64,6 +66,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         "metrics": metrics,
         "drift_events": drift_events,
         "audit": list_audit(conn, 50),
+        "execution": profile.to_dict(),
     }
 
 

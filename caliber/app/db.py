@@ -1,90 +1,56 @@
-"""SQLite repository bootstrap and small connection helpers."""
+"""SQLite repository bootstrap: engine gating, connections and migrations."""
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
 
-SCHEMA = """
-PRAGMA foreign_keys = ON;
+from .engine import DEFAULT_MIN_SQLITE_VERSION, ensure_min_engine_version
+from .migrations import BASELINE_STATEMENTS, migrate
 
-CREATE TABLE IF NOT EXISTS metrics (
-    key TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    owner TEXT NOT NULL,
-    unit TEXT NOT NULL,
-    grain TEXT NOT NULL,
-    current_version INTEGER NOT NULL,
-    definition_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS metric_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    metric_key TEXT NOT NULL REFERENCES metrics(key) ON DELETE CASCADE,
-    version INTEGER NOT NULL,
-    definition_json TEXT NOT NULL,
-    source_file TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(metric_key, version)
-);
-
-CREATE TABLE IF NOT EXISTS runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    status TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    metrics_json TEXT NOT NULL,
-    datasets_dir TEXT NOT NULL,
-    tolerances_json TEXT NOT NULL,
-    summary_json TEXT NOT NULL DEFAULT '{}',
-    error TEXT
-);
-
-CREATE TABLE IF NOT EXISTS snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    metric_key TEXT NOT NULL,
-    metric_version INTEGER NOT NULL,
-    datasets_json TEXT NOT NULL,
-    impl_ids_json TEXT NOT NULL,
-    verdict TEXT NOT NULL,
-    summary_json TEXT NOT NULL,
-    result_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at TEXT NOT NULL,
-    action TEXT NOT NULL,
-    entity TEXT NOT NULL,
-    status TEXT NOT NULL,
-    detail_json TEXT NOT NULL DEFAULT '{}'
-);
-
-CREATE INDEX IF NOT EXISTS idx_versions_key ON metric_versions(metric_key, version DESC);
-CREATE INDEX IF NOT EXISTS idx_snapshots_key ON snapshots(metric_key, id DESC);
-CREATE INDEX IF NOT EXISTS idx_snapshots_run ON snapshots(run_id);
-CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
-"""
+#: Legacy single-string view of the v1 baseline, kept for compatibility.
+#: New code should rely on ``app.migrations`` instead of executing this.
+SCHEMA = "PRAGMA foreign_keys = ON;\n" + ";\n".join(BASELINE_STATEMENTS) + ";\n"
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
-    """Open a normal read/write SQLite connection."""
+def connect(
+    db_path: str | Path,
+    *,
+    min_sqlite_version: str | None = None,
+) -> sqlite3.Connection:
+    """Open a read/write connection after enforcing the engine version floor.
+
+    The floor defaults to ``DEFAULT_MIN_SQLITE_VERSION`` and can be lowered
+    or raised per deployment (see ``Config.min_sqlite_version`` /
+    ``CALIBER_MIN_SQLITE_VERSION``).  Environments below the floor are
+    rejected with :class:`app.errors.DatabaseVersionError` naming both the
+    detected and the required version.
+    """
     path = str(db_path)
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        ensure_min_engine_version(conn, min_sqlite_version or DEFAULT_MIN_SQLITE_VERSION)
+        conn.execute("PRAGMA foreign_keys = ON")
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
-def init_db(db_path: str | Path) -> sqlite3.Connection:
-    conn = connect(db_path)
-    conn.executescript(SCHEMA)
-    conn.commit()
+def init_db(
+    db_path: str | Path,
+    *,
+    min_sqlite_version: str | None = None,
+) -> sqlite3.Connection:
+    """Open the repository and apply any pending schema migrations."""
+    conn = connect(db_path, min_sqlite_version=min_sqlite_version)
+    try:
+        migrate(conn)
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
@@ -92,4 +58,3 @@ def table_counts(conn: sqlite3.Connection) -> dict[str, int]:
     tables = ("metrics", "metric_versions", "runs", "snapshots", "audit_log")
     return {name: int(conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0])
             for name in tables}
-

@@ -75,3 +75,17 @@ class ReportError(CaliberError):
 
 class RunError(CaliberError):
     code = "run_error"
+
+
+class DatabaseVersionError(CaliberError):
+    """Raised when the SQLite engine is below the configured version floor."""
+
+    code = "unsupported_sqlite_version"
+    http_status = 500
+
+
+class MigrationError(CaliberError):
+    """Raised when a schema migration fails; the database is rolled back."""
+
+    code = "migration_failed"
+    http_status = 500

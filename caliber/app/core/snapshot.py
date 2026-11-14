@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..audit import log_audit, record_error
+from ..engine import ExecutionProfile, probe_capabilities
 from ..errors import CaliberError, NotFoundError, RunError
 from ..models import ComparisonResult, ImplEvaluation, MetricDefinition, utc_now
 from .evaluator import run_metric
@@ -55,8 +56,9 @@ def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinitio
     cursor = conn.execute(
         """
         INSERT INTO snapshots(run_id, metric_key, metric_version, datasets_json,
-                              impl_ids_json, verdict, summary_json, result_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              impl_ids_json, verdict, summary_json, result_json, created_at,
+                              dimension_count, diff_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id, metric.key, comparison.metric_version,
@@ -66,6 +68,8 @@ def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinitio
             json.dumps(comparison.summary, ensure_ascii=False),
             json.dumps(result, ensure_ascii=False, sort_keys=True),
             utc_now(),
+            int(comparison.summary.get("dimension_count", 0)),
+            int(comparison.summary.get("diff_count", 0)),
         ),
     )
     conn.commit()
@@ -101,29 +105,85 @@ def snapshots_for_run(conn: sqlite3.Connection, run_id: int) -> list[dict[str, A
     return [_decode_snapshot(row) for row in rows]
 
 
-def detect_drift(conn: sqlite3.Connection, metric_key: str) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        "SELECT id, verdict, metric_version, created_at FROM snapshots "
-        "WHERE metric_key = ? ORDER BY id",
-        (metric_key,),
-    ).fetchall()
+def _drift_events(
+    metric_key: str,
+    transitions: list[tuple[Any, Any, Any, Any, Any, Any, Any]],
+) -> list[dict[str, Any]]:
+    """Build drift events from (prev_id, prev_verdict, prev_version, id,
+    verdict, version, created_at) transition tuples."""
     events: list[dict[str, Any]] = []
-    for previous, current in zip(rows, rows[1:]):
-        if previous["verdict"] == "consistent" and current["verdict"] == "inconsistent":
+    for prev_id, prev_verdict, prev_version, cur_id, verdict, version, created_at in transitions:
+        if prev_verdict == "consistent" and verdict == "inconsistent":
             events.append(
                 {
                     "metric_key": metric_key,
-                    "from_snapshot_id": previous["id"],
-                    "to_snapshot_id": current["id"],
-                    "from_version": previous["metric_version"],
-                    "to_version": current["metric_version"],
+                    "from_snapshot_id": prev_id,
+                    "to_snapshot_id": cur_id,
+                    "from_version": prev_version,
+                    "to_version": version,
                     "from_verdict": "consistent",
                     "to_verdict": "inconsistent",
-                    "detected_at": current["created_at"],
+                    "detected_at": created_at,
                     "message": "判定从 consistent 漂移为 inconsistent",
                 }
             )
     return events
+
+
+def detect_drift(
+    conn: sqlite3.Connection,
+    metric_key: str,
+    *,
+    profile: ExecutionProfile | None = None,
+) -> list[dict[str, Any]]:
+    """Detect consistent → inconsistent transitions for one metric.
+
+    Modern dialect uses a LAG() window query; engines without window
+    functions fall back to an equivalent pairwise scan in Python.  Both
+    dialects return identical events; the chosen strategy is recorded in
+    the execution profile when one is provided.
+    """
+    caps = profile.capabilities if profile is not None else probe_capabilities(conn)
+    transitions: list[tuple[Any, Any, Any, Any, Any, Any, Any]] = []
+    if caps.window_functions:
+        rows = conn.execute(
+            """
+            SELECT LAG(id) OVER w AS prev_id,
+                   LAG(verdict) OVER w AS prev_verdict,
+                   LAG(metric_version) OVER w AS prev_version,
+                   id, verdict, metric_version, created_at
+            FROM snapshots
+            WHERE metric_key = ?
+            WINDOW w AS (ORDER BY id)
+            ORDER BY id
+            """,
+            (metric_key,),
+        ).fetchall()
+        for row in rows:
+            if row["prev_id"] is not None:
+                transitions.append(
+                    (row["prev_id"], row["prev_verdict"], row["prev_version"],
+                     row["id"], row["verdict"], row["metric_version"], row["created_at"])
+                )
+    else:
+        if profile is not None:
+            profile.record_fallback(
+                "drift_detection",
+                "python_pairwise_scan",
+                "窗口函数不可用，回退为逐对比较",
+            )
+        rows = conn.execute(
+            "SELECT id, verdict, metric_version, created_at FROM snapshots "
+            "WHERE metric_key = ? ORDER BY id",
+            (metric_key,),
+        ).fetchall()
+        for previous, current in zip(rows, rows[1:]):
+            transitions.append(
+                (previous["id"], previous["verdict"], previous["metric_version"],
+                 current["id"], current["verdict"], current["metric_version"],
+                 current["created_at"])
+            )
+    return _drift_events(metric_key, transitions)
 
 
 def list_runs(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
@@ -163,6 +223,7 @@ def perform_run(
     keys = list(dict.fromkeys(metric_keys or [item["key"] for item in list_metrics(conn)]))
     if not keys:
         raise RunError("没有可执行的指标，请先导入指标定义")
+    profile = ExecutionProfile(probe_capabilities(conn))
     tolerances = {"abs": float(abs_tolerance), "rel": float(rel_tolerance)}
     run_id = create_run(conn, keys, datasets_dir, tolerances)
     log_audit(conn, "run.started", f"run:{run_id}", "ok", {"metrics": keys})
@@ -180,16 +241,24 @@ def perform_run(
                 max_rows=max_rows,
                 abs_tolerance=abs_tolerance,
                 rel_tolerance=rel_tolerance,
+                profile=profile,
             )
             save_snapshot(conn, run_id, metric, comparison, evaluations)
             summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id
+        summary["execution"] = profile.to_dict()
         finish_run(conn, run_id, status="completed", summary=summary)
         log_audit(conn, "run.completed", f"run:{run_id}", "ok", summary)
         return run_id
     except Exception as exc:
-        finish_run(conn, run_id, status="failed", error=str(exc))
+        finish_run(
+            conn,
+            run_id,
+            status="failed",
+            summary={"execution": profile.to_dict()},
+            error=str(exc),
+        )
         record_error(conn, "run.failed", f"run:{run_id}", exc, extra={"metrics": keys})
         if isinstance(exc, CaliberError):
             raise

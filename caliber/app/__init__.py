@@ -24,7 +24,7 @@ from .models import utc_now
 def create_app(config: Config | None = None) -> Flask:
     cfg = config or Config.from_env()
     cfg.ensure_dirs()
-    init_db(cfg.db_path).close()
+    init_db(cfg.db_path, min_sqlite_version=cfg.min_sqlite_version).close()
 
     app = Flask(__name__)
     app.config["CALIBER"] = cfg
@@ -34,7 +34,7 @@ def create_app(config: Config | None = None) -> Flask:
 
     def get_db() -> sqlite3.Connection:
         if "db" not in g:
-            g.db = connect(cfg.db_path)
+            g.db = connect(cfg.db_path, min_sqlite_version=cfg.min_sqlite_version)
         return g.db
 
     @app.before_request

@@ -39,7 +39,10 @@ def test_import_twice_creates_two_versions_and_history(
     assert [item["version"] for item in versions] == [2, 1]
     assert get_version(conn, "active_users", 1)["definition"]["grain"] == "day"
     assert list_metrics(conn)[0]["key"] == "active_users"
-    assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == 6
+    imports = conn.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE action = 'metric.import'"
+    ).fetchone()[0]
+    assert imports == 6
 
 
 def test_version_diff_reports_modified_field(
