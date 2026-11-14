@@ -47,10 +47,13 @@ def finish_run(conn: sqlite3.Connection, run_id: int, *, status: str,
 
 
 def save_snapshot(conn: sqlite3.Connection, run_id: int, metric: MetricDefinition,
-                  comparison: ComparisonResult, evaluations: dict[str, ImplEvaluation]) -> int:
+                  comparison: ComparisonResult, evaluations: dict[str, ImplEvaluation],
+                  attribution: dict[str, Any] | None = None) -> int:
     result = comparison.to_dict()
     result["metric"] = metric.to_dict()
     result["implementations"] = [item.to_dict() for item in evaluations.values()]
+    if attribution is not None:
+        result["attribution"] = attribution
     datasets = sorted({item.source for item in evaluations.values()})
     cursor = conn.execute(
         """
@@ -159,6 +162,8 @@ def perform_run(
     max_rows: int = 10_000,
     abs_tolerance: float = 1e-6,
     rel_tolerance: float = 0.0,
+    attribution_chunk_size: int = 2048,
+    attribution_max_representatives: int = 5,
 ) -> int:
     keys = list(dict.fromkeys(metric_keys or [item["key"] for item in list_metrics(conn)]))
     if not keys:
@@ -167,11 +172,12 @@ def perform_run(
     run_id = create_run(conn, keys, datasets_dir, tolerances)
     log_audit(conn, "run.started", f"run:{run_id}", "ok", {"metrics": keys})
     summary = {verdict: 0 for verdict in VERDICTS}
+    attribution_counts = {"ok": 0, "degraded": 0, "skipped": 0}
     try:
         for key in keys:
             latest = get_latest(conn, key)
             metric = MetricDefinition.from_dict(latest["definition"])
-            comparison, evaluations = run_metric(
+            comparison, evaluations, attribution = run_metric(
                 metric,
                 int(latest["version"]),
                 catalog,
@@ -180,11 +186,27 @@ def perform_run(
                 max_rows=max_rows,
                 abs_tolerance=abs_tolerance,
                 rel_tolerance=rel_tolerance,
+                chunk_size=attribution_chunk_size,
+                max_representatives=attribution_max_representatives,
             )
-            save_snapshot(conn, run_id, metric, comparison, evaluations)
+            save_snapshot(conn, run_id, metric, comparison, evaluations, attribution)
             summary[comparison.verdict] = summary.get(comparison.verdict, 0) + 1
+            status = attribution.get("status", "skipped")
+            attribution_counts[status] = attribution_counts.get(status, 0) + 1
+            if status == "degraded":
+                log_audit(
+                    conn,
+                    "attribution.degraded",
+                    f"metric:{key}",
+                    "error",
+                    {
+                        "run_id": run_id,
+                        "reasons": attribution.get("degraded_reasons", []),
+                    },
+                )
         summary["metrics"] = len(keys)
         summary["run_id"] = run_id
+        summary["attribution"] = attribution_counts
         finish_run(conn, run_id, status="completed", summary=summary)
         log_audit(conn, "run.completed", f"run:{run_id}", "ok", summary)
         return run_id

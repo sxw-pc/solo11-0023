@@ -8,7 +8,7 @@ def test_metric_query_api(imported_client):
     response = imported_client.get("/api/metrics")
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["count"] == 3
+    assert payload["count"] == 4
 
     response = imported_client.get("/api/metrics/active_users")
     assert response.status_code == 200

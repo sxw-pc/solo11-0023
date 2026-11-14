@@ -9,12 +9,41 @@ import yaml
 from ..errors import DslParseError
 from ..models import ImplementDef, MetricDefinition, ValidationIssue
 
-TOP_FIELDS = {"key", "name", "owner", "description", "unit", "grain", "impls"}
+TOP_FIELDS = {"key", "name", "owner", "description", "unit", "grain", "impls", "natural_keys"}
 IMPL_FIELDS = {"id", "source", "sql_file"}
 
 
 def _issue(field: str, code: str, message: str) -> ValidationIssue:
     return ValidationIssue(field=field, code=code, message=message)
+
+
+def _parse_natural_keys(raw: Any, issues: list[ValidationIssue]) -> list[str]:
+    """Parse the optional ``natural_keys`` field (string or list of strings).
+
+    Missing/empty means the metric runs dimension comparison only and detail
+    attribution is skipped at run time.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        issues.append(
+            _issue("natural_keys", "type", "natural_keys 必须是字符串或字符串数组")
+        )
+        return []
+    keys: list[str] = []
+    for index, item in enumerate(raw):
+        field_name = f"natural_keys[{index}]"
+        if not isinstance(item, str) or not item.strip():
+            issues.append(
+                _issue(field_name, "required", "natural_keys 的每一项必须是非空字符串")
+            )
+            continue
+        name = item.strip()
+        if name not in keys:
+            keys.append(name)
+    return keys
 
 
 def _parse_impls(raw: Any, issues: list[ValidationIssue]) -> list[ImplementDef]:
@@ -84,6 +113,7 @@ def parse_metric_text(text: str, source: str = "<string>") -> MetricDefinition:
             if name != "description" and not values[name]:
                 issues.append(_issue(name, "required", f"{name} 不能为空"))
     impls = _parse_impls(raw.get("impls"), issues)
+    natural_keys = _parse_natural_keys(raw.get("natural_keys"), issues)
 
     if issues:
         raise DslParseError(
@@ -99,6 +129,7 @@ def parse_metric_text(text: str, source: str = "<string>") -> MetricDefinition:
         unit=values["unit"],
         grain=values["grain"],
         impls=impls,
+        natural_keys=natural_keys,
     )
 
 

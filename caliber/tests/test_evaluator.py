@@ -119,6 +119,8 @@ def test_run_metric_on_fixtures(
     assert set(evaluations) == {"impl_a", "impl_b"}
     assert evaluations["impl_a"].values == evaluations["impl_b"].values
     assert evaluations["impl_a"].duration_ms >= 0
-    comparison, _ = run_metric(metric, 1, catalog, sql_roots)
+    comparison, _, attribution = run_metric(metric, 1, catalog, sql_roots)
     assert comparison.verdict == "consistent"
+    assert attribution["status"] == "skipped"
+    assert attribution["degraded_reasons"][0]["code"] == "natural_key_not_declared"
 

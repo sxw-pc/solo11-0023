@@ -26,6 +26,7 @@ class MetricDefinition:
     unit: str
     grain: str
     impls: list[ImplementDef]
+    natural_keys: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -41,6 +42,16 @@ class MetricDefinition:
             for item in data.get("impls", [])
             if isinstance(item, Mapping)
         ]
+        raw_keys = data.get("natural_keys", [])
+        if isinstance(raw_keys, str):
+            raw_keys = [raw_keys]
+        natural_keys = [
+            str(item).strip()
+            for item in (raw_keys or [])
+            if isinstance(item, str) and item.strip()
+        ]
+        # 去重但保持声明顺序
+        natural_keys = list(dict.fromkeys(natural_keys))
         return cls(
             key=str(data.get("key", "")),
             name=str(data.get("name", "")),
@@ -49,6 +60,7 @@ class MetricDefinition:
             unit=str(data.get("unit", "")),
             grain=str(data.get("grain", "")),
             impls=impls,
+            natural_keys=natural_keys,
         )
 
 
@@ -107,9 +119,18 @@ class ImplEvaluation:
     values: dict[str, float]
     row_count: int
     duration_ms: float
+    # 明细暂存文件路径（JSONL），仅运行期用于归因，不进入快照 JSON
+    detail_file: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "impl_id": self.impl_id,
+            "source": self.source,
+            "sql_file": self.sql_file,
+            "values": self.values,
+            "row_count": self.row_count,
+            "duration_ms": self.duration_ms,
+        }
 
 
 @dataclass(slots=True)

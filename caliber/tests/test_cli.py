@@ -23,12 +23,12 @@ def test_import_run_and_report_end_to_end(
     assert code == 0
     output = capsys.readouterr().out
     assert "导入 active_users v1" in output
-    assert "成功 3" in output
+    assert "成功 4" in output
 
     connection = connect(db_path)
     try:
-        assert connection.execute("SELECT COUNT(*) FROM metrics").fetchone()[0] == 3
-        assert connection.execute("SELECT COUNT(*) FROM metric_versions").fetchone()[0] == 3
+        assert connection.execute("SELECT COUNT(*) FROM metrics").fetchone()[0] == 4
+        assert connection.execute("SELECT COUNT(*) FROM metric_versions").fetchone()[0] == 4
     finally:
         connection.close()
 
@@ -67,7 +67,7 @@ def test_import_run_and_report_end_to_end(
     )
     assert code == 0
     assert output_path.is_file()
-    assert '"report_version": "1.0"' in output_path.read_text(encoding="utf-8")
+    assert '"report_version": "1.1"' in output_path.read_text(encoding="utf-8")
 
 
 def test_cli_run_unknown_metric_returns_nonzero(

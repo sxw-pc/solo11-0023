@@ -23,12 +23,13 @@ def test_all_fixture_metrics_produce_consistent_and_inconsistent_snapshots(
 ):
     run_id = execute_fixture_run()
     snapshots = snapshots_for_run(registry_conn, run_id)
-    assert len(snapshots) == 3
+    assert len(snapshots) == 4
     verdicts = {item["metric_key"]: item["verdict"] for item in snapshots}
     assert verdicts == {
         "active_users": "consistent",
         "avg_order_value": "inconsistent",
         "conversion_rate": "consistent",
+        "segment_revenue": "inconsistent",
     }
     assert set(list_snapshots(registry_conn, limit=10)[0]["impl_ids"]) == {"impl_a", "impl_b"}
     assert get_snapshot(registry_conn, snapshots[0]["id"])["result"]["metric"]["name"]
@@ -81,10 +82,10 @@ def test_manual_snapshot_and_report_formats(registry_conn, execute_fixture_run, 
     run_id = execute_fixture_run()
     report = build_report(registry_conn, run_id)
     assert report["run"]["id"] == run_id
-    assert report["summary"]["metric_count"] == 3
-    assert report["summary"]["inconsistent"] == 1
+    assert report["summary"]["metric_count"] == 4
+    assert report["summary"]["inconsistent"] == 2
     assert report["summary"]["drift_count"] == 0
-    assert len(report["metrics"]) == 3
+    assert len(report["metrics"]) == 4
     avg = next(item for item in report["metrics"] if item["key"] == "avg_order_value")
     assert avg["verdict"] == "inconsistent"
     assert avg["diffs"]

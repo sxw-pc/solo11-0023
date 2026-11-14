@@ -16,7 +16,8 @@ from app.errors import DatasetError, NotFoundError
 
 def test_fixture_catalog_metadata_and_types(catalog: DatasetCatalog):
     assert set(catalog.datasets) == {
-        "orders_a", "orders_b", "users_a", "users_b"
+        "orders_a", "orders_b", "users_a", "users_b",
+        "revenue_a", "revenue_b",
     }
     users = catalog.require("users_a")
     assert users.row_count == 7

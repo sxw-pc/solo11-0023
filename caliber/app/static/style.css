@@ -131,3 +131,13 @@ td small { display:block; color:var(--muted); }
   .panel { padding:16px 14px; overflow-x:auto; }
   table { min-width:640px; }
 }
+
+/* 明细差异聚类归因面板 */
+.attribution { margin-top: 14px; border: 1px solid var(--border, #d7e0e8); border-radius: 8px; background: #fbfdff; }
+.attribution > summary { cursor: pointer; padding: 10px 14px; font-weight: 600; color: var(--ink, #0f3d5c); list-style: revert; }
+.attribution[open] > summary { border-bottom: 1px solid var(--border, #d7e0e8); }
+.attribution .pill { margin-left: 8px; }
+.pill.skipped, .pill.unsupported { background: #eef1f5; color: #52606d; }
+.attribution-hint { padding: 0 14px; }
+.attribution table, .attribution p { margin: 10px 14px; }
+.attribution table { width: calc(100% - 28px); }

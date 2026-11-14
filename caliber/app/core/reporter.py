@@ -26,6 +26,24 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         key = snapshot["metric_key"]
         keys.add(key)
         counts[snapshot["verdict"]] = counts.get(snapshot["verdict"], 0) + 1
+        attribution = result.get("attribution")
+        if attribution is None:
+            # 老快照：写入时还没有明细归因能力，报告侧只能提示，不能报错
+            attribution = {
+                "status": "unsupported",
+                "natural_keys": definition.get("natural_keys", []),
+                "degraded_reasons": [
+                    {
+                        "code": "legacy_snapshot",
+                        "message": "该快照生成于归因能力上线前，result_json 中没有明细归因数据。",
+                    }
+                ],
+                "clusters": [],
+                "total_aligned_keys": 0,
+                "affected_keys": 0,
+                "affected_ratio": None,
+                "meta": {},
+            }
         metrics.append(
             {
                 "key": key,
@@ -42,6 +60,7 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
                 "dimensions": result.get("dimensions", []),
                 "diffs": result.get("diffs", []),
                 "implementations": result.get("implementations", []),
+                "attribution": attribution,
                 "tolerances": {
                     "abs": result.get("abs_tolerance"),
                     "rel": result.get("rel_tolerance"),
@@ -52,14 +71,19 @@ def build_report(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     drift_events: list[dict[str, Any]] = []
     for key in sorted(keys):
         drift_events.extend(detect_drift(conn, key))
+    attribution_summary = {"ok": 0, "degraded": 0, "skipped": 0, "unsupported": 0}
+    for item in metrics:
+        status = item["attribution"]["status"]
+        attribution_summary[status] = attribution_summary.get(status, 0) + 1
     return {
-        "report_version": "1.0",
+        "report_version": "1.1",
         "generated_at": utc_now(),
         "run": run,
         "summary": {
             "metric_count": len(metrics),
             **counts,
             "drift_count": len(drift_events),
+            "attribution": attribution_summary,
         },
         "metrics": metrics,
         "drift_events": drift_events,
@@ -77,6 +101,57 @@ def _cell(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.6g}"
     return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def _attribution_hint(item: dict[str, Any]) -> tuple[str, str]:
+    """Return (status, hint) for non-ok attribution blocks."""
+    attribution = item.get("attribution") or {}
+    status = attribution.get("status", "unsupported")
+    reasons = attribution.get("degraded_reasons") or []
+    message = reasons[0].get("message", "") if reasons else ""
+    if status == "skipped":
+        return status, message or "未声明自然键，跳过明细归因。"
+    if status == "degraded":
+        return status, message or "明细归因失败，已降级为仅维度比对。"
+    if status == "unsupported":
+        return status, message or "老快照不含明细归因数据。"
+    return status, ""
+
+
+def _render_attribution_markdown(item: dict[str, Any]) -> list[str]:
+    attribution = item.get("attribution") or {}
+    status = attribution.get("status", "unsupported")
+    lines: list[str] = ["**明细差异聚类归因**", ""]
+    if status != "ok":
+        _, hint = _attribution_hint(item)
+        lines.extend([f"> ⚠️ 归因状态 `{status}`：{hint}", ""])
+        return lines
+    natural_keys = ", ".join(attribution.get("natural_keys", []))
+    lines.append(
+        f"- 自然键：`{natural_keys}`；对齐键数 {attribution['total_aligned_keys']}，"
+        f"受影响 {attribution['affected_keys']}"
+        f"（{attribution.get('affected_ratio') or 0:.2%}）；"
+        f"差异簇 {len(attribution['clusters'])} 个"
+    )
+    lines.append("")
+    if not attribution["clusters"]:
+        lines.append("所有自然键在容差内一致，未形成差异簇。")
+        lines.append("")
+        return lines
+    lines.append("| 差异类型 | 模式 | 影响键数 | 占比 | 代表键 |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for cluster in attribution["clusters"]:
+        representatives = "; ".join(
+            _cell(key) for key in cluster["representative_keys"]
+        )
+        ratio = cluster.get("affected_ratio")
+        lines.append(
+            f"| {cluster['diff_type']} | {_cell(cluster['signature_label'])} | "
+            f"{cluster['affected_keys']} | "
+            f"{'-' if ratio is None else f'{ratio:.2%}'} | {representatives} |"
+        )
+    lines.append("")
+    return lines
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -123,6 +198,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"{impl['row_count']} | {impl['duration_ms']} |"
             )
         lines.append("")
+        lines.extend(_render_attribution_markdown(item))
         if item["diffs"]:
             lines.extend(
                 [
@@ -158,6 +234,52 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def _render_attribution_html(item: dict[str, Any]) -> list[str]:
+    attribution = item.get("attribution") or {}
+    status = attribution.get("status", "unsupported")
+    parts = ["<h3>明细差异聚类归因</h3>"]
+    if status != "ok":
+        _, hint = _attribution_hint(item)
+        parts.append(
+            f'<p class="meta">归因状态 <code>{html.escape(status)}</code>：'
+            f"{html.escape(hint)}</p>"
+        )
+        return parts
+    natural_keys = ", ".join(attribution.get("natural_keys", []))
+    parts.append(
+        '<p class="meta">自然键 '
+        f"<code>{html.escape(natural_keys)}</code> · 对齐键 "
+        f"{attribution['total_aligned_keys']} · 受影响 "
+        f"{attribution['affected_keys']} · 差异簇 {len(attribution['clusters'])} 个</p>"
+    )
+    if not attribution["clusters"]:
+        parts.append("<p>所有自然键在容差内一致，未形成差异簇。</p>")
+        return parts
+    parts.append(
+        "<table><tr><th>差异类型</th><th>模式</th><th>影响键数</th><th>占比</th>"
+        "<th>代表键 / 代表值</th></tr>"
+    )
+    for cluster in attribution["clusters"]:
+        ratio = cluster.get("affected_ratio")
+        ratio_text = "-" if ratio is None else f"{ratio:.2%}"
+        rows: list[str] = []
+        for representative in cluster["representative_rows"]:
+            key_text = _cell(representative["natural_key"])
+            value_text = _cell(representative["values"])
+            rows.append(
+                f"<code>{html.escape(key_text)}</code> "
+                f"<span class='meta'>{html.escape(value_text)}</span>"
+            )
+        parts.append(
+            f"<tr><td>{html.escape(cluster['diff_type'])}</td>"
+            f"<td>{html.escape(cluster['signature_label'])}</td>"
+            f"<td>{cluster['affected_keys']}</td><td>{ratio_text}</td>"
+            f"<td>{'<br>'.join(rows)}</td></tr>"
+        )
+    parts.append("</table>")
+    return parts
 
 
 def render_html(report: dict[str, Any]) -> str:
@@ -196,6 +318,7 @@ def render_html(report: dict[str, Any]) -> str:
                 f"<td>{impl['duration_ms']}</td></tr>"
             )
         parts.append("</table>")
+        parts.extend(_render_attribution_html(item))
         if item["diffs"]:
             parts.append("<table><tr><th>维度</th><th>类型</th>")
             for impl_id in item["impl_ids"]:

@@ -1,0 +1,21 @@
+# 合成 fixture：复合自然键对齐，两实现明细预期聚成三个差异簇
+# 1) only_one_side：east/x1 仅 impl_a 存在
+# 2) type_mismatch：north/m1（文本）、north/m2（NULL）与 impl_a 数值类型不一致
+# 3) value_deviation：east/x2、east/x3、east/x4、north/m3、north/m4 数值偏离（同一分箱）
+# south/s1、south/s2 完全一致，不产生差异簇
+key: segment_revenue
+name: 细分收入
+owner: commerce-analytics
+description: 按区域与细分段对齐的收入明细，用于验证差异聚类归因。
+unit: 元
+grain: day
+natural_keys:
+  - region
+  - segment
+impls:
+  - id: impl_a
+    source: revenue_a
+    sql_file: segment_revenue_impl_a.sql
+  - id: impl_b
+    source: revenue_b
+    sql_file: segment_revenue_impl_b.sql

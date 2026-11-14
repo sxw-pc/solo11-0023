@@ -69,7 +69,7 @@
           <td><code>{{ diff.dimension }}</code></td>
           <td><span class="pill {{ 'inconsistent' if diff.kind == 'value_mismatch' else 'partial' }}">{{ diff.kind }}</span></td>
           {% for impl_id in item.impl_ids %}
-            <td>{% set value = diff.values.get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
+            <td>{% set value = diff['values'].get(impl_id) %}{% if value is none %}<span class="muted">缺失</span>{% else %}{{ "%.6g" | format(value) }}{% endif %}</td>
           {% endfor %}
           <td>{% if diff.max_delta is none %}-{% else %}{{ "%.6g" | format(diff.max_delta) }}{% endif %}</td>
         </tr>
@@ -79,6 +79,61 @@
     {% else %}
     <p class="success-note">全部维度在容差内一致。</p>
     {% endif %}
+
+    {% set attr = item.attribution %}
+    <details class="attribution" {{ 'open' if attr.status == 'ok' and attr.clusters }}>
+      <summary>
+        明细差异聚类归因
+        <span class="pill {{ attr.status }}">
+          {{ attr.status }}
+          {% if attr.status == 'ok' %}· {{ attr.clusters | length }} 簇 / 受影响 {{ attr.affected_keys }} 键{% endif %}
+        </span>
+      </summary>
+      {% if attr.status != 'ok' %}
+        {% set reason = attr.degraded_reasons[0] if attr.degraded_reasons else None %}
+        <p class="muted attribution-hint">
+          {% if attr.status == 'skipped' %}该指标未声明自然键（natural_keys），已跳过明细归因，仅保留维度差值。
+          {% elif attr.status == 'degraded' %}明细归因已降级，维度比对结果不受影响{% if reason %}：{{ reason.message }}{% endif %}。
+          {% elif attr.status == 'unsupported' %}该快照生成于归因能力上线前，没有明细归因数据；重新执行 run 即可生成。
+          {% endif %}
+        </p>
+      {% else %}
+        <p class="muted">
+          自然键 <code>{{ attr.natural_keys | join(', ') }}</code> ·
+          对齐键 {{ attr.total_aligned_keys }} · 受影响 {{ attr.affected_keys }}（{{ '%.2f%%' | format(attr.affected_ratio * 100) }}） ·
+          键策略 <code>{{ attr.key_strategy }}</code> ·
+          分块 {{ attr.meta.partition_count }} 区 × {{ attr.meta.partition_chunk_size }} 行（磁盘暂存）
+        </p>
+        {% if attr.clusters %}
+        <table>
+          <thead>
+            <tr><th>差异类型</th><th>模式</th><th>影响键数</th><th>占比</th><th>代表键（有界 {{ attr.meta.max_representatives_per_cluster }} 条）</th><th>代表值</th></tr>
+          </thead>
+          <tbody>
+          {% for cluster in attr.clusters %}
+            <tr>
+              <td><span class="pill {{ 'inconsistent' if cluster.diff_type == 'value_deviation' else 'partial' }}">{{ cluster.diff_type }}</span></td>
+              <td>{{ cluster.signature_label }}</td>
+              <td>{{ cluster.affected_keys }}</td>
+              <td>{{ '%.2f%%' | format(cluster.affected_ratio * 100) if cluster.affected_ratio is not none else '-' }}</td>
+              <td>
+                {% for key in cluster.representative_keys %}<code>{{ key | join(' | ') }}</code>{% if not loop.last %}<br>{% endif %}{% endfor %}
+              </td>
+              <td class="mono">
+                {% for row in cluster.representative_rows %}
+                  {% for impl_id in item.impl_ids %}{{ impl_id }}={% set v = row['values'].get(impl_id) %}{% if v is none %}<span class="muted">缺失</span>{% else %}{{ v }}{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}
+                  {% if not loop.last %}<br>{% endif %}
+                {% endfor %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="success-note">所有自然键在容差内一致，未形成差异簇。</p>
+        {% endif %}
+      {% endif %}
+    </details>
   </section>
   {% endfor %}
 

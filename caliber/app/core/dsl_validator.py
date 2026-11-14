@@ -54,6 +54,18 @@ def validate_definition(
         add("grain", "enum", "grain 必须是 day/week/month 之一")
     if len(metric.impls) < 2:
         add("impls", "min_items", "至少需要两个实现才能进行一致性比对")
+    if not isinstance(metric.natural_keys, list):
+        add("natural_keys", "type", "natural_keys 必须是字符串数组")
+    else:
+        if len(metric.natural_keys) > 5:
+            add("natural_keys", "max_items", "natural_keys 最多声明 5 列复合键")
+        seen_keys: set[str] = set()
+        for index, name in enumerate(metric.natural_keys):
+            if not isinstance(name, str) or not name.strip():
+                add(f"natural_keys[{index}]", "required", "自然键列名不能为空")
+            elif name in seen_keys:
+                add(f"natural_keys[{index}]", "duplicate", f"自然键列重复: {name}")
+            seen_keys.add(name)
 
     seen: set[str] = set()
     roots = tuple(Path(root) for root in sql_roots)

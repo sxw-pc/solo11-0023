@@ -133,3 +133,21 @@ def test_resolve_missing_and_unsafe(sql_dir: Path):
         resolve_sql_path("none.sql", [sql_dir])
     with pytest.raises(UnsafeSQLError):
         resolve_sql_path("../a.sql", [sql_dir])
+
+
+def test_natural_keys_validation(sql_dir: Path):
+    # 合法复合键不产生 issue
+    metric = make_metric(natural_keys=["region", "segment"])
+    assert validate_definition(metric, (sql_dir,)) == []
+
+    # 重复列名
+    issues = validate_definition(
+        make_metric(natural_keys=["region", "region"]), (sql_dir,)
+    )
+    assert any(item.code == "duplicate" and "natural_keys" in item.field for item in issues)
+
+    # 超过 5 列复合键
+    issues = validate_definition(
+        make_metric(natural_keys=["a", "b", "c", "d", "e", "f"]), (sql_dir,)
+    )
+    assert any(item.field == "natural_keys" and item.code == "max_items" for item in issues)

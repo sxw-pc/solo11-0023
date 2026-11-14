@@ -70,6 +70,7 @@ pytest --cov=app/core --cov-report=term-missing
 | `description` | string | 口径说明，可为空字符串 |
 | `unit` | string | 展示单位，如 `人`、`%`、`元` |
 | `grain` | enum | `day` / `week` / `month` |
+| `natural_keys` | string \| string[] | 可选。明细归因使用的自然键列名，支持多列复合键；省略则跳过明细归因 |
 | `impls` | list | 至少两项；每项含 `id`、`source`、`sql_file` |
 
 实现字段：
@@ -126,6 +127,39 @@ SQL 约定：
 - `partial`：不存在数值超差，但至少一个实现缺少某个维度。
 
 `inconsistent` 优先于 `partial`。每次指标比对写入一条快照，记录指标 key、版本号、数据集、实现集合、判定、差异摘要与时间戳。若同一指标的上一条快照为 `consistent`、当前快照为 `inconsistent`，报告会标记一条漂移事件。
+
+## 4.1 明细差异聚类归因
+
+维度差值只能回答「哪个维度差了多少」，归因能力进一步回答「差异落在哪些自然键上、能否归成少数几类模式」。
+
+**对齐粒度的取舍**：自然键必须在指标 DSL 中用 `natural_keys` **显式声明**（单列字符串或多列数组），不从结果列名推断。原因写进了每条快照的归因元信息（`key_strategy_rationale`）：自然键是指标的语义契约，列名推断在别名、复合键场景会静默错配，错误对齐比不对齐危害更大；显式声明可校验、随指标定义版本化并进入审计快照。
+
+声明示例（复合键）：
+
+```yaml
+natural_keys:
+  - region
+  - segment
+```
+
+声明后，每个实现的 SQL 需返回「自然键列 + 最后一列指标值」（2–6 列）。执行结束时归因模块按自然键对齐两侧明细行，把对不上的行聚成差异簇，每簇包含：
+
+- `diff_type` 差异类型：`only_one_side`（仅一侧存在）、`value_deviation`（数值偏离，按相对偏离确定性分箱）、`type_mismatch`（类型不一致，如字符串/NULL 对数值）。
+- `affected_keys` 影响键数与 `affected_ratio` 占比。
+- 有界的 `representative_keys` / `representative_rows`（默认每簇最多 5 条，取字典序最小的键，两次运行完全一致）。
+
+**流式与内存约束**：两份实现的明细不会一次性读进内存。每个实现的结果先流式写入 JSONL 暂存文件，再按自然键哈希切成多个分区（每区默认约 2048 行）落盘，逐分区对齐；簇累加器只保有界代表键，内存不随全量明细增长。暂存目录在归因结束后自动清理。
+
+**降级行为（单条指标归因失败不拖垮整批 run）**：
+
+| 场景 | 归因状态 | 行为 |
+| --- | --- | --- |
+| DSL 未声明 `natural_keys` | `skipped` | 不读明细，只保留维度差值，报告提示未声明 |
+| 声明的键列在某实现结果中缺失 | `degraded`（`natural_key_column_missing`） | 保留维度结果，写审计 `attribution.degraded`，run 继续 |
+| 归因过程抛异常 | `degraded`（`attribution_error`） | 同上，run 标记 completed |
+| 归因能力上线前的老快照 | 报告侧标记 `unsupported`（`legacy_snapshot`） | 只提示不报错，重跑 run 即可生成 |
+
+`fixtures/metrics/segment_revenue.yaml` 是验收用三簇示例：`only_one_side`（1 键）、`type_mismatch`（2 键）、`value_deviation`（5 键），另有 2 键完全一致不入簇。
 
 ## 5. 目录结构
 
@@ -195,6 +229,7 @@ caliber/
 - `active_users`：两套用户数据的活跃日期分布相同，预期 `consistent`。
 - `conversion_rate`：两套订单金额不同，但按日支付订单比例相同，预期 `consistent`。
 - `avg_order_value`：两套订单金额被刻意设置不同，预期 `inconsistent`，用于验证差异明细与漂移链路。
+- `segment_revenue`：复合自然键（region, segment）明细，刻意构造单侧缺失、类型不一致、数值偏离三类差异簇，用于验证归因能力。
 
 任何示例使用的域名仅限 `example.invalid`、`localhost` 或 `127.0.0.1`；本项目实际上不做 DNS 或 HTTP 出站访问。
 
@@ -204,7 +239,7 @@ caliber/
 
 - 单进程同步执行，一个运行内按指标串行求值。
 - CSV 全量加载到内存 SQLite；超大文件不适合。
-- SQL 结果契约固定为 1–2 列；多维度组合需要预先拼成一个维度列。
+- SQL 结果契约：普通维度比对固定 1–2 列；声明 `natural_keys` 的归因查询允许 2–6 列（自然键列 + 末尾指标值）。
 - 漂移只检测相邻快照的 `consistent → inconsistent`，不检测版本定义差异引起的语义漂移。
 - 无用户、权限、调度、告警和报告持久化文件管理。
 - 报告 HTML 是独立静态字符串，和本地页面不是同一模板系统。

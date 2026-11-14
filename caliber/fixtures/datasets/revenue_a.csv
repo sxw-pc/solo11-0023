@@ -1,0 +1,11 @@
+region,segment,revenue
+east,x1,100
+east,x2,200
+east,x3,300
+east,x4,400
+north,m1,1000
+north,m2,2000
+north,m3,3000
+north,m4,4000
+south,s1,50
+south,s2,80

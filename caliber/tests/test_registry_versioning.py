@@ -23,7 +23,7 @@ def test_import_twice_creates_two_versions_and_history(
     registry = MetricRegistry(conn, sql_roots)
     first = registry.import_directory(fixture_tree / "metrics")
     assert first.ok
-    assert len(first.imported) == 3
+    assert len(first.imported) == 4
     assert all(item.version == 1 for item in first.imported)
 
     second = registry.import_directory(fixture_tree / "metrics")
@@ -39,7 +39,7 @@ def test_import_twice_creates_two_versions_and_history(
     assert [item["version"] for item in versions] == [2, 1]
     assert get_version(conn, "active_users", 1)["definition"]["grain"] == "day"
     assert list_metrics(conn)[0]["key"] == "active_users"
-    assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == 6
+    assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == 8
 
 
 def test_version_diff_reports_modified_field(
